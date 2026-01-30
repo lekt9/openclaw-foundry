@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Foundry" width="120" />
+</p>
+
 # Foundry
 
 **The forge that forges itself.**
