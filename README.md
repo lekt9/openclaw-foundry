@@ -23,6 +23,34 @@ Foundry is a self-writing meta-extension for [OpenClaw](https://github.com/lekt9
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## OpenClaw vs Foundry
+
+**OpenClaw** is the platform — an agent runtime with:
+- Gateway, channels, memory, sessions
+- Tool execution and skill loading
+- Model providers and routing
+- The infrastructure everything runs on
+
+**Foundry** is a plugin that runs *on* OpenClaw:
+- Researches docs → writes new extensions/skills/hooks
+- Has its own learning engine (not part of OpenClaw core)
+- Can modify itself via `foundry_extend_self`
+- Publishes to Foundry Marketplace
+
+```
+OpenClaw (platform)
+├── Gateway
+├── Channels (Discord, Slack, Telegram...)
+├── Skills & Tools
+└── Plugins
+    └── Foundry (this repo)
+        ├── writes → extensions, skills, hooks
+        ├── learns → from failures/successes
+        └── publishes → to marketplace
+```
+
+**Key distinction:** OpenClaw doesn't have built-in self-learning. Foundry adds that capability on top. Foundry is an "agent that builds agents" — it uses OpenClaw's infrastructure to create new OpenClaw capabilities.
+
 ## Why Self-Writing Matters
 
 The key insight isn't "LLM writes code for you" — it's "the system improves itself."
