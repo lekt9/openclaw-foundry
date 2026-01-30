@@ -505,6 +505,36 @@ interface PendingSession {
   createdAt: string;
 }
 
+// ── Workflow Learning Types ─────────────────────────────────────────────────
+
+interface WorkflowEntry {
+  id: string;
+  goal: string;                    // User's intent extracted from first message
+  toolSequence: string[];          // Ordered list of tools called
+  startedAt: number;
+  completedAt: number;
+  outcome: "success" | "failure" | "partial";
+  context: string;                 // Summary of what was achieved
+}
+
+interface WorkflowPattern {
+  id: string;
+  signature: string;               // Normalized: "tool1→tool2→tool3"
+  goalKeywords: string[];          // Common goal words across occurrences
+  occurrences: number;             // How many times this pattern appeared
+  successRate: number;             // % of successful outcomes
+  avgDuration: number;             // Average time to complete (ms)
+  crystallizedTo?: string;         // Tool ID if converted to a tool
+  lastOccurrence: number;
+}
+
+interface WorkflowSuggestion {
+  patternId: string;
+  signature: string;
+  description: string;             // "You often do X when [goal keywords]"
+  confidence: number;              // 0-1 based on occurrences and success rate
+}
+
 interface ExtensionDef {
   id: string;
   name: string;
@@ -1060,6 +1090,8 @@ class LearningEngine {
   private metricsPath: string;
   private outcomesPath: string;
   private insightsPath: string;
+  private workflowsPath: string;
+  private workflowPatternsPath: string;
   private learnings: LearningEntry[] = [];
   private pendingSession: PendingSession | null = null;
   private toolMetrics: Map<string, ToolMetrics> = new Map();
@@ -1069,6 +1101,10 @@ class LearningEngine {
   private outcomes: TaskOutcome[] = [];
   private taskTypeInsights: Map<string, TaskTypeInsights> = new Map();
   private feedbackCollectionInterval: NodeJS.Timeout | null = null;
+  // Workflow learning
+  private workflows: WorkflowEntry[] = [];
+  private workflowPatterns: Map<string, WorkflowPattern> = new Map();
+  private currentWorkflow: { goal: string; tools: string[]; startedAt: number } | null = null;
 
   constructor(
     private dataDir: string,
@@ -1079,12 +1115,15 @@ class LearningEngine {
     this.metricsPath = join(dataDir, "metrics.json");
     this.outcomesPath = join(dataDir, "outcomes.json");
     this.insightsPath = join(dataDir, "task-insights.json");
+    this.workflowsPath = join(dataDir, "workflows.json");
+    this.workflowPatternsPath = join(dataDir, "workflow-patterns.json");
 
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
     this.loadLearnings();
     this.loadPendingSession();
     this.loadOutcomes();
     this.loadMetrics();
+    this.loadWorkflows();
   }
 
   private loadMetrics(): void {
@@ -1961,6 +2000,193 @@ ${escapedResolution}
       this.saveOutcomes();
       this.logger?.info(`[foundry] Marked improvement applied for ${taskType}`);
     }
+  }
+
+  // ── Workflow Learning ─────────────────────────────────────────────────────
+
+  private loadWorkflows(): void {
+    if (existsSync(this.workflowsPath)) {
+      try {
+        this.workflows = JSON.parse(readFileSync(this.workflowsPath, "utf-8"));
+      } catch {
+        this.workflows = [];
+      }
+    }
+    if (existsSync(this.workflowPatternsPath)) {
+      try {
+        const data = JSON.parse(readFileSync(this.workflowPatternsPath, "utf-8"));
+        this.workflowPatterns = new Map(Object.entries(data));
+      } catch {
+        this.workflowPatterns = new Map();
+      }
+    }
+  }
+
+  private saveWorkflows(): void {
+    writeFileSync(this.workflowsPath, JSON.stringify(this.workflows, null, 2));
+    const patternsObj = Object.fromEntries(this.workflowPatterns);
+    writeFileSync(this.workflowPatternsPath, JSON.stringify(patternsObj, null, 2));
+  }
+
+  // Start tracking a new workflow when user sends first message
+  startWorkflow(goal: string): void {
+    this.currentWorkflow = {
+      goal,
+      tools: [],
+      startedAt: Date.now(),
+    };
+    this.logger?.info(`[foundry] Started tracking workflow: ${goal.slice(0, 50)}...`);
+  }
+
+  // Track tool call within current workflow
+  trackWorkflowTool(toolName: string): void {
+    if (this.currentWorkflow && !toolName.startsWith("foundry_")) {
+      this.currentWorkflow.tools.push(toolName);
+    }
+  }
+
+  // Complete and record the workflow
+  completeWorkflow(outcome: "success" | "failure" | "partial", context: string): void {
+    if (!this.currentWorkflow || this.currentWorkflow.tools.length < 2) {
+      this.currentWorkflow = null;
+      return;
+    }
+
+    const entry: WorkflowEntry = {
+      id: `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      goal: this.currentWorkflow.goal,
+      toolSequence: this.currentWorkflow.tools,
+      startedAt: this.currentWorkflow.startedAt,
+      completedAt: Date.now(),
+      outcome,
+      context,
+    };
+
+    this.workflows.push(entry);
+    this.logger?.info(`[foundry] Recorded workflow: ${entry.toolSequence.length} tools, outcome=${outcome}`);
+
+    // Update patterns
+    this.updateWorkflowPatterns(entry);
+    this.saveWorkflows();
+    this.currentWorkflow = null;
+  }
+
+  // Create normalized signature from tool sequence
+  private createWorkflowSignature(tools: string[]): string {
+    return tools.slice(0, 10).join("→");
+  }
+
+  // Extract keywords from goal text
+  private extractGoalKeywords(goal: string): string[] {
+    const stopWords = new Set(["a", "an", "the", "to", "for", "of", "and", "or", "in", "on", "with", "is", "it", "i", "me", "my", "can", "you", "please", "want", "need", "help"]);
+    return goal
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, "")
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !stopWords.has(w))
+      .slice(0, 10);
+  }
+
+  // Update workflow patterns after recording a workflow
+  private updateWorkflowPatterns(entry: WorkflowEntry): void {
+    const signature = this.createWorkflowSignature(entry.toolSequence);
+    const existing = this.workflowPatterns.get(signature);
+    const keywords = this.extractGoalKeywords(entry.goal);
+
+    if (existing) {
+      // Update existing pattern
+      existing.occurrences++;
+      existing.lastOccurrence = Date.now();
+      const successCount = existing.successRate * (existing.occurrences - 1) + (entry.outcome === "success" ? 1 : 0);
+      existing.successRate = successCount / existing.occurrences;
+      existing.avgDuration = (existing.avgDuration * (existing.occurrences - 1) + (entry.completedAt - entry.startedAt)) / existing.occurrences;
+      // Merge keywords
+      const keywordSet = new Set([...existing.goalKeywords, ...keywords]);
+      existing.goalKeywords = Array.from(keywordSet).slice(0, 20);
+      this.workflowPatterns.set(signature, existing);
+    } else {
+      // Create new pattern
+      const pattern: WorkflowPattern = {
+        id: `wp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        signature,
+        goalKeywords: keywords,
+        occurrences: 1,
+        successRate: entry.outcome === "success" ? 1 : 0,
+        avgDuration: entry.completedAt - entry.startedAt,
+        lastOccurrence: Date.now(),
+      };
+      this.workflowPatterns.set(signature, pattern);
+    }
+  }
+
+  // Find workflow patterns that match user's goal
+  findMatchingWorkflows(userMessage: string): WorkflowSuggestion[] {
+    const userKeywords = this.extractGoalKeywords(userMessage);
+    if (userKeywords.length === 0) return [];
+
+    const suggestions: WorkflowSuggestion[] = [];
+
+    for (const pattern of this.workflowPatterns.values()) {
+      // Only suggest patterns with enough occurrences and good success rate
+      if (pattern.occurrences < 3 || pattern.successRate < 0.5 || pattern.crystallizedTo) continue;
+
+      // Calculate keyword overlap
+      const overlap = userKeywords.filter(k => pattern.goalKeywords.includes(k)).length;
+      if (overlap === 0) continue;
+
+      const confidence = (overlap / userKeywords.length) * pattern.successRate * Math.min(pattern.occurrences / 5, 1);
+      if (confidence < 0.3) continue;
+
+      suggestions.push({
+        patternId: pattern.id,
+        signature: pattern.signature,
+        description: `You've done "${pattern.signature}" ${pattern.occurrences}x (${(pattern.successRate * 100).toFixed(0)}% success) when working with: ${pattern.goalKeywords.slice(0, 5).join(", ")}`,
+        confidence,
+      });
+    }
+
+    return suggestions.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+  }
+
+  // Get patterns ready for crystallization (convert to a single tool)
+  getWorkflowCrystallizationCandidates(): WorkflowPattern[] {
+    return Array.from(this.workflowPatterns.values()).filter(p =>
+      p.occurrences >= 5 &&
+      p.successRate >= 0.7 &&
+      !p.crystallizedTo
+    );
+  }
+
+  // Mark a workflow pattern as crystallized into a tool
+  markWorkflowCrystallized(patternId: string, toolId: string): void {
+    for (const pattern of this.workflowPatterns.values()) {
+      if (pattern.id === patternId) {
+        pattern.crystallizedTo = toolId;
+        this.saveWorkflows();
+        this.logger?.info(`[foundry] Workflow pattern ${patternId} crystallized to tool ${toolId}`);
+        return;
+      }
+    }
+  }
+
+  // Get workflow stats for display
+  getWorkflowStats(): { totalWorkflows: number; patterns: number; suggestions: number } {
+    const candidateCount = this.getWorkflowCrystallizationCandidates().length;
+    return {
+      totalWorkflows: this.workflows.length,
+      patterns: this.workflowPatterns.size,
+      suggestions: candidateCount,
+    };
+  }
+
+  // Check if this is the first run (no workflows recorded yet)
+  isFirstRun(): boolean {
+    return this.workflows.length === 0;
+  }
+
+  // Get recent workflows for context
+  getRecentWorkflows(limit = 5): WorkflowEntry[] {
+    return this.workflows.slice(-limit);
   }
 }
 
@@ -4317,10 +4543,17 @@ ${p.hookCode}
 
     // ── before_agent_start Hook ─────────────────────────────────────────────
     // Check for pending session (resume after restart) and inject learnings
+    // Start workflow tracking and inject proactive suggestions
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const extensions = writer.getExtensions();
       const skills = writer.getSkills();
       const pendingSession = learningEngine.getPendingSession();
+      const userMessage = event?.userMessage || ctx?.lastUserMessage || "";
+
+      // Start tracking this workflow
+      if (userMessage) {
+        learningEngine.startWorkflow(userMessage);
+      }
 
       let resumeContext = "";
       if (pendingSession) {
@@ -4339,6 +4572,39 @@ ${p.hookCode}
         // Clear the pending session after injecting
         learningEngine.clearPendingSession();
         logger.info(`[foundry] Resumed session: ${pendingSession.reason}`);
+      }
+
+      // Workflow suggestions: check if user's message matches known patterns
+      let workflowContext = "";
+      if (userMessage && !pendingSession) {
+        const suggestions = learningEngine.findMatchingWorkflows(userMessage);
+        if (suggestions.length > 0) {
+          workflowContext = `
+## 🔄 WORKFLOW SUGGESTIONS
+
+Based on your request, I've done similar workflows before:
+
+${suggestions.map(s => `- **${s.signature}** (${(s.confidence * 100).toFixed(0)}% match)\n  ${s.description}`).join("\n\n")}
+
+I can follow one of these proven approaches, or we can try something new.
+
+`;
+          logger.info(`[foundry] Injected ${suggestions.length} workflow suggestions`);
+        }
+
+        // First-run onboarding
+        if (learningEngine.isFirstRun()) {
+          workflowContext += `
+## 👋 FOUNDRY LEARNING
+
+This is our first session! I'll start learning your workflows:
+- I observe which tools you use and in what order
+- After 3+ repetitions of a pattern, I'll suggest automating it
+- The more we work together, the better I get at anticipating your needs
+
+`;
+          logger.info(`[foundry] First run - injected onboarding message`);
+        }
       }
 
       // Include relevant learnings if we have patterns
@@ -4437,13 +4703,15 @@ Use \`foundry_track_outcome\` after executing tasks to continue learning.
         outcomeInsights += `\nUse \`foundry_apply_improvement\` to implement these upgrades.\n\n`;
       }
 
+      const workflowStats = learningEngine.getWorkflowStats();
+
       return {
-        prependContext: `${resumeContext}${evolutionContext}${outcomeInsights}${learningsContext}
+        prependContext: `${resumeContext}${workflowContext}${evolutionContext}${outcomeInsights}${learningsContext}
 ## Foundry: Self-Writing Coding Subagent
 
 Grounded in **docs.molt.bot** — fetches documentation on demand. Can modify its own source code.
 
-**Written**: ${extensions.length} extensions, ${skills.length} skills | **Learnings**: ${learningEngine.getLearningsSummary()}
+**Written**: ${extensions.length} extensions, ${skills.length} skills | **Learnings**: ${learningEngine.getLearningsSummary()} | **Workflows**: ${workflowStats.totalWorkflows} recorded, ${workflowStats.patterns} patterns
 
 **Tools**:
 - \`foundry_research\` — Search docs.molt.bot for best practices
@@ -4467,6 +4735,7 @@ When you need a new capability:
 4. \`foundry_restart\` — restart gateway to load, auto-resumes
 
 **Feedback Loop**: After tasks like social posts, track outcomes and collect metrics. Insights will improve future runs.
+**Workflow Learning**: I observe your tool sequences and suggest automation after repeated patterns.
 `,
       };
     });
@@ -4474,12 +4743,16 @@ When you need a new capability:
     // ── after_tool_call Hook ─────────────────────────────────────────────────
     // RISE: Recursive introspection with context injection
     // ADAS: Tool performance tracking for fitness evolution
+    // Workflow: Track tool sequence for pattern detection
     api.on("after_tool_call", async (event: any, ctx: any) => {
       const { toolName, result, error, startTime } = event;
       const latencyMs = startTime ? Date.now() - startTime : 0;
 
       // Skip our own tools to avoid recursive learning
       if (toolName?.startsWith("foundry_")) return;
+
+      // Track tool in current workflow
+      learningEngine.trackWorkflowTool(toolName || "unknown");
 
       const isError = error || (result && typeof result === "object" && (result as any).error);
 
@@ -4579,9 +4852,13 @@ ${escapedResolution}
     });
 
     // ── agent_end Hook ───────────────────────────────────────────────────────
-    // Learn from completed sessions
+    // Learn from completed sessions and record workflows
     api.on("agent_end", async (event: any, ctx: any) => {
       const { outcome, toolsUsed } = event;
+
+      // Complete workflow recording
+      const workflowOutcome = outcome === "success" ? "success" : outcome === "failure" ? "failure" : "partial";
+      learningEngine.completeWorkflow(workflowOutcome, ctx?.summary?.slice(0, 200) || "");
 
       if (outcome === "success" && toolsUsed?.length > 2) {
         // Record successful tool combinations
