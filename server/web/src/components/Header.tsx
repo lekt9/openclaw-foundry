@@ -13,8 +13,11 @@ export function Header() {
         </Link>
 
         <nav className="header-nav">
-          <Link to="/" className="nav-link active">
+          <Link to="/" className="nav-link">
             Marketplace
+          </Link>
+          <Link to="/whitepaper" className="nav-link">
+            Whitepaper
           </Link>
           <a
             href="https://github.com/lekt9/openclaw-foundry"
