@@ -1,0 +1,33 @@
+{
+  "id": "foundry",
+  "name": "Foundry",
+  "description": "Self-writing meta-extension that forges new capabilities — researches docs, writes extensions, tools, hooks, and skills",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dataDir": {
+        "type": "string",
+        "description": "Directory to store forged artifacts (default: ~/.clawdbot/foundry)"
+      },
+      "autoLearn": {
+        "type": "boolean",
+        "description": "Automatically learn from agent failures and successes"
+      },
+      "sources": {
+        "type": "object",
+        "properties": {
+          "arxiv": { "type": "boolean", "description": "Learn from arXiv papers" },
+          "github": { "type": "boolean", "description": "Learn from GitHub repos" },
+          "docs": { "type": "boolean", "description": "Learn from documentation" },
+          "experience": { "type": "boolean", "description": "Learn from own successes/failures" }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "dataDir": { "label": "Data Directory", "placeholder": "~/.clawdbot/foundry" },
+    "autoLearn": { "label": "Auto-Learn", "help": "Automatically learn from agent activity" }
+  }
+}
