@@ -6,7 +6,7 @@ export function Whitepaper() {
           <div className="whitepaper-badge">Research</div>
           <h1>The Forge That Forges Itself</h1>
           <p className="whitepaper-subtitle">
-            How Foundry writes code into itself—and builds capabilities for OpenClaw
+            The AI that rewrites its own brain. Every fix makes the fixer better.
           </p>
           <div className="whitepaper-meta">
             <span>Foundry Labs</span>
@@ -18,12 +18,11 @@ export function Whitepaper() {
         <section className="whitepaper-abstract">
           <h2>Abstract</h2>
           <p>
-            Foundry is a self-writing meta-extension for <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer">OpenClaw</a>.
-            It doesn't just write code for you—it writes code <em>into itself</em>. When Foundry encounters
-            a failure, it researches docs, writes a fix, and deploys it as part of its own codebase.
-            Each fix makes Foundry better at writing fixes. It also writes extensions, skills, and hooks
-            for the OpenClaw platform. This paper presents the research foundations, implementation
-            architecture, and economic model powering the first AI extension that improves itself.
+            Foundry is an AI agent that writes its own code. When it fails at a task, it doesn't just
+            report the error—it writes a fix and deploys it into its own codebase. The system that
+            writes the code IS the code being written. Each fix makes Foundry better at everything
+            it does. This paper presents the research foundations, implementation architecture, and
+            economic model powering the first AI agent that improves itself by rewriting its own brain.
           </p>
         </section>
 

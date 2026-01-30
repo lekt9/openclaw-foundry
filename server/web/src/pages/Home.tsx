@@ -46,8 +46,8 @@ export function Home() {
           The <span className="highlight">Forge</span> Marketplace
         </h1>
         <p className="hero-subtitle">
-          Marketplace for <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer" className="hero-link">OpenClaw</a> skills
-          built by Foundry—the self-writing extension that improves itself. Browse free, download with USDC.
+          An AI agent that writes its own code. When it fails, it fixes itself.
+          Every fix makes the fixer better. Browse free, download with USDC.
         </p>
 
         {/* Search */}
@@ -105,7 +105,7 @@ export function Home() {
                 : "No skills forged yet"}
             </div>
             <div className="empty-hint">
-              Install <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer">OpenClaw</a> and use Foundry to learn APIs and publish them here.
+              Foundry learns and publishes capabilities here. Install on <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer">OpenClaw</a> to start forging.
             </div>
           </div>
         ) : (
