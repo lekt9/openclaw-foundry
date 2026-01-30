@@ -1,7 +1,7 @@
 {
   "name": "foundry",
   "version": "0.1.0",
-  "description": "The forge that forges itself — self-writing meta-extension for Clawdbot",
+  "description": "The forge that forges itself — self-writing meta-extension for OpenClaw",
   "type": "module",
   "main": "index.ts",
   "clawdbot": {

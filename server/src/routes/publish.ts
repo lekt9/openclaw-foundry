@@ -58,7 +58,7 @@ const ABILITY_PRICES: Record<string, number> = {
   skill: 1,       // API skills
   pattern: 0,     // Failure resolution patterns (free for now to encourage sharing)
   technique: 2,   // Reusable code snippets
-  extension: 5,   // Full clawdbot plugins
+  extension: 5,   // Full OpenClaw plugins
   insight: 1,     // Successful approaches
   agent: 10,      // High-fitness agent designs
 };

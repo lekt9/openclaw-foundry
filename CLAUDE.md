@@ -1,32 +1,36 @@
 # Foundry — The Forge That Forges Itself
 
-Self-writing meta-extension for Clawdbot. Researches docs, learns from failures, writes new capabilities.
+Self-writing meta-extension for OpenClaw. Researches docs, learns from failures, writes new capabilities.
 
 ## Quick Reference
 
 ### Tools
 ```
-foundry_research       — Search docs.molt.bot
-foundry_docs           — Read specific doc pages
-foundry_implement      — Research + implement end-to-end
-foundry_write_extension — Write new extension
-foundry_write_skill    — Write API skill
-foundry_add_tool       — Add tool to extension
-foundry_add_hook       — Add hook to extension
-foundry_extend_self    — Add capability to Foundry itself
-foundry_list           — List written artifacts
-foundry_restart        — Restart gateway with resume
-foundry_learnings      — View patterns/insights
-foundry_publish_ability — Publish to Foundry Marketplace
-foundry_marketplace    — Search, leaderboard, install abilities
+foundry_research         — Search docs.openclaw.ai (fetches llms.txt index)
+foundry_docs             — Read specific doc pages
+foundry_implement        — Research + implement end-to-end
+foundry_write_extension  — Write new extension
+foundry_write_skill      — Write OpenClaw/AgentSkills-compatible skill
+foundry_write_browser_skill — Write browser automation skill (gated on browser.enabled)
+foundry_write_hook       — Write standalone hook (HOOK.md + handler.ts)
+foundry_add_tool         — Add tool to extension
+foundry_add_hook         — Add hook to extension
+foundry_extend_self      — Add capability to Foundry itself
+foundry_list             — List written artifacts
+foundry_restart          — Restart gateway with resume
+foundry_learnings        — View patterns/insights
+foundry_publish_ability  — Publish to Foundry Marketplace
+foundry_marketplace      — Search, leaderboard, install abilities
 ```
 
 ### Key Directories
 ```
-~/.clawdbot/foundry/            — Data directory
-~/.clawdbot/extensions/         — Generated extensions go here
-~/.clawdbot/skills/             — Generated skills go here
-~/.clawdbot/hooks/foundry-resume/ — Restart resume hook
+~/.openclaw/foundry/            — Data directory
+~/.openclaw/extensions/         — Generated extensions go here
+~/.openclaw/skills/             — Generated skills go here
+~/.openclaw/hooks/              — Generated hooks go here
+~/.openclaw/hooks/foundry-resume/ — Restart resume hook
+./skills/                       — Bundled skills (shipped with plugin)
 ```
 
 ## Development
@@ -38,8 +42,8 @@ npx tsc --noEmit
 
 ### Test Extension Locally
 ```bash
-clawdbot gateway restart
-tail -f ~/.clawdbot/logs/gateway.log | grep foundry
+openclaw gateway restart
+tail -f ~/.openclaw/logs/gateway.log | grep foundry
 ```
 
 ## Architecture
@@ -85,7 +89,7 @@ Static security scan + isolated process sandbox testing.
 Extensions are tested in isolated process before deployment:
 1. Write to temp directory
 2. Spawn Node process with tsx
-3. Mock Clawdbot API
+3. Mock OpenClaw API
 4. Try to import and run register()
 5. If fails → reject, gateway stays safe
 6. If passes → deploy to real extensions
@@ -190,7 +194,7 @@ foundry_extend_self({
       "foundry": {
         "enabled": true,
         "config": {
-          "dataDir": "~/.clawdbot/foundry",
+          "dataDir": "~/.openclaw/foundry",
           "autoLearn": true
         }
       }
@@ -199,12 +203,127 @@ foundry_extend_self({
 }
 ```
 
+## Example: Write a Skill (OpenClaw-compatible)
+
+Skills follow the [AgentSkills](https://agentskills.io) / OpenClaw format with YAML frontmatter.
+
+### General Skill
+```typescript
+foundry_write_skill({
+  name: "my-skill",
+  description: "Does something useful",
+  content: "## How to use\n\nInstructions here...\n\nUse `{baseDir}` to reference skill folder.",
+  metadata: {
+    openclaw: {
+      requires: { bins: ["node"], env: ["API_KEY"] },
+      primaryEnv: "API_KEY"
+    }
+  }
+})
+```
+
+### API-based Skill (Legacy)
+```typescript
+foundry_write_skill({
+  name: "my-api",
+  description: "API integration",
+  baseUrl: "https://api.example.com",
+  endpoints: [
+    { method: "GET", path: "/users/{id}", description: "Get user by ID" },
+    { method: "POST", path: "/users", description: "Create user" }
+  ],
+  authHeaders: { "Authorization": "Bearer ${API_KEY}" }
+})
+```
+
+### Skill Frontmatter Options
+```yaml
+---
+name: my-skill
+description: What the skill does
+homepage: https://example.com
+user-invocable: true
+disable-model-invocation: false
+command-dispatch: tool
+command-tool: my_tool
+command-arg-mode: raw
+metadata: {"openclaw":{"requires":{"bins":["node"],"env":["API_KEY"]},"primaryEnv":"API_KEY"}}
+---
+```
+
+### Gating (metadata.openclaw.requires)
+- `bins` — Required binaries on PATH
+- `anyBins` — At least one must be on PATH
+- `env` — Required environment variables
+- `config` — Required config paths in openclaw.json
+
+## Example: Write a Browser Skill
+
+Browser skills use the OpenClaw `browser` tool for web automation.
+
+```typescript
+foundry_write_browser_skill({
+  name: "twitter-poster",
+  description: "Post tweets via browser automation",
+  targetUrl: "https://twitter.com",
+  actions: [
+    {
+      name: "Post Tweet",
+      description: "Create and post a new tweet",
+      steps: [
+        "browser open https://twitter.com/compose/tweet",
+        "browser snapshot",
+        "browser type ref=tweet_input 'Your tweet content'",
+        "browser click ref=post_button"
+      ]
+    }
+  ],
+  authMethod: "manual",
+  authNotes: "Sign in to Twitter in the openclaw browser profile first"
+})
+```
+
+Browser skills are automatically gated on `browser.enabled` config.
+
+## Example: Write a Hook
+
+Hooks trigger on OpenClaw events like `command:new`, `gateway:startup`, etc.
+
+```typescript
+foundry_write_hook({
+  name: "welcome-message",
+  description: "Send welcome message on new sessions",
+  events: ["command:new"],
+  code: `const handler: HookHandler = async (event: HookEvent) => {
+  if (event.type !== 'command' || event.action !== 'new') return;
+  event.messages.push('Welcome! I am ready to help.');
+};`,
+  metadata: { openclaw: { emoji: "👋" } }
+})
+```
+
+Enable with: `openclaw hooks enable welcome-message`
+
+### Available Hook Events
+- `command:new` — New session/command started
+- `command:reset` — Session reset
+- `command:stop` — Session stopped
+- `agent:bootstrap` — Before workspace file injection
+- `gateway:startup` — After channels load
+- `tool_result_persist` — Before tool result is persisted
+
 ## Learnings
 
-- Extensions MUST go in `~/.clawdbot/extensions/` for clawdbot to discover them
-- Each extension needs both `index.ts` and `clawdbot.plugin.json`
+- Extensions MUST go in `~/.openclaw/extensions/` for openclaw to discover them
+- Each extension needs both `index.ts` and `openclaw.plugin.json`
 - Tools use `parameters` (not `inputSchema`) with `execute(_toolCallId, params)`
-- Hooks use `api.on(event, handler)` with async handlers
+- Extension hooks use `api.on(event, handler)` with async handlers
+- Standalone hooks use `HOOK.md` + `handler.ts` pattern in `~/.openclaw/hooks/`
 - Gateway restart required to load new extensions
-- Skills go in `~/.clawdbot/skills/` and work with unbrowse_replay
+- Skills go in `~/.openclaw/skills/` with proper SKILL.md frontmatter
+- Skills use AgentSkills/OpenClaw format with YAML frontmatter (name + description required)
+- Metadata must be single-line JSON per OpenClaw spec
 - Sandbox validation catches runtime errors before deployment
+- Browser skills require `browser.enabled` config
+- Use `{baseDir}` in skill content to reference the skill folder
+- Plugins can ship skills via `skills` array in openclaw.plugin.json

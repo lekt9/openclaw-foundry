@@ -1,8 +1,8 @@
 /**
- * Foundry — Self-writing coding subagent for Clawdbot.
+ * Foundry — Self-writing coding subagent for OpenClaw.
  *
  * A meta-extension that researches best practices and writes code into:
- * - Clawdbot extensions (tools, hooks)
+ * - OpenClaw extensions (tools, hooks)
  * - Skills (SKILL.md + api.ts)
  * - The extension itself
  *
@@ -11,32 +11,40 @@
  * Tools:
  *   foundry_research     — Search docs.molt.bot for best practices
  *   foundry_implement    — Research + implement a capability
- *   foundry_write_extension — Write a new clawdbot extension
+ *   foundry_write_extension — Write a new OpenClaw extension
  *   foundry_write_skill  — Write a skill package
  *   foundry_add_tool     — Add a tool to an existing extension
  *   foundry_add_hook     — Add a hook to an existing extension
  *   foundry_list         — List written extensions/skills
- *   foundry_docs         — Read clawdbot plugin/hooks documentation
+ *   foundry_docs         — Read OpenClaw plugin/hooks documentation
  */
 
 import type { ClawdbotPluginApi, ClawdbotPluginToolContext } from "clawdbot/plugin-sdk";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { SelfWriter } from "./src/self-writer";
 
 // ── Documentation URLs ───────────────────────────────────────────────────────
 
+// Primary: OpenClaw documentation (AgentSkills-compatible)
+const OPENCLAW_DOCS_BASE = "https://docs.openclaw.ai";
+const OPENCLAW_LLMS_TXT = `${OPENCLAW_DOCS_BASE}/llms.txt`;
+
+// Fallback: molt.bot documentation
 const DOCS_BASE = "https://docs.molt.bot";
 const LLMS_TXT = `${DOCS_BASE}/llms.txt`;
 
 // Key documentation pages for different capabilities
+// Prioritizes OpenClaw docs for skills, falls back to molt.bot for other topics
 const DOC_PAGES: Record<string, string[]> = {
-  plugin: ["/tools/plugin"],
+  // OpenClaw primary docs (skills, plugins, clawdhub)
+  skills: ["/tools/skills", "/tools/skills-config", "/tools/clawdhub"],
+  plugin: ["/plugin", "/tools/plugin"],
+  clawdhub: ["/tools/clawdhub"],
+  // Gateway and infrastructure
   hooks: ["/automation/hooks"],
   tools: ["/tools/tools", "/tools/lobster", "/tools/exec"],
   browser: ["/tools/browser", "/tools/browser-login"],
-  skills: ["/tools/skills", "/tools/skills-config"],
   agent: ["/concepts/agent", "/concepts/agent-loop", "/concepts/system-prompt"],
   gateway: ["/gateway/gateway", "/gateway/configuration", "/gateway/protocol"],
   channels: ["/channels/index", "/channels/whatsapp", "/channels/telegram", "/channels/discord"],
@@ -49,12 +57,49 @@ const DOC_PAGES: Record<string, string[]> = {
 
 // ── Documentation Fetcher ────────────────────────────────────────────────────
 
+// Topics that should use OpenClaw docs as primary source
+const OPENCLAW_TOPICS = new Set(["skills", "plugin", "clawdhub"]);
+
 class DocsFetcher {
   private cache: Map<string, { content: string; fetchedAt: number }> = new Map();
   private cacheTtl = 1000 * 60 * 30; // 30 minutes
+  private openclawIndex: string | null = null;
 
-  async fetchPage(path: string): Promise<string> {
-    const url = path.startsWith("http") ? path : `${DOCS_BASE}${path}`;
+  /**
+   * Fetch the OpenClaw llms.txt index for discovering available documentation pages.
+   * This should be called first to understand what docs are available.
+   */
+  async fetchOpenClawIndex(): Promise<string> {
+    if (this.openclawIndex) return this.openclawIndex;
+
+    try {
+      const res = await fetch(OPENCLAW_LLMS_TXT);
+      if (res.ok) {
+        this.openclawIndex = await res.text();
+        this.cache.set(OPENCLAW_LLMS_TXT, { content: this.openclawIndex, fetchedAt: Date.now() });
+        return this.openclawIndex;
+      }
+    } catch (err) {
+      // Fallback silently
+    }
+    return "OpenClaw llms.txt not available. Using fallback documentation.";
+  }
+
+  /**
+   * Get the base URL for a topic - OpenClaw for skills/plugins, molt.bot for others
+   */
+  private getBaseUrl(topic: string): string {
+    return OPENCLAW_TOPICS.has(topic.toLowerCase()) ? OPENCLAW_DOCS_BASE : DOCS_BASE;
+  }
+
+  async fetchPage(path: string, preferOpenClaw = false): Promise<string> {
+    // Determine base URL
+    let baseUrl = DOCS_BASE;
+    if (preferOpenClaw || path.includes("/skills") || path.includes("/plugin") || path.includes("/clawdhub")) {
+      baseUrl = OPENCLAW_DOCS_BASE;
+    }
+
+    const url = path.startsWith("http") ? path : `${baseUrl}${path}`;
 
     // Check cache
     const cached = this.cache.get(url);
@@ -64,7 +109,20 @@ class DocsFetcher {
 
     try {
       const res = await fetch(url);
-      if (!res.ok) return `Failed to fetch ${url}: ${res.status}`;
+      if (!res.ok) {
+        // If OpenClaw fails, try molt.bot as fallback
+        if (baseUrl === OPENCLAW_DOCS_BASE) {
+          const fallbackUrl = `${DOCS_BASE}${path}`;
+          const fallbackRes = await fetch(fallbackUrl);
+          if (fallbackRes.ok) {
+            const html = await fallbackRes.text();
+            const content = this.extractContent(html);
+            this.cache.set(fallbackUrl, { content, fetchedAt: Date.now() });
+            return content;
+          }
+        }
+        return `Failed to fetch ${url}: ${res.status}`;
+      }
 
       const html = await res.text();
       // Extract main content - simple markdown extraction
@@ -90,10 +148,17 @@ class DocsFetcher {
       return `No documentation pages mapped for topic: ${topic}. Available topics: ${Object.keys(DOC_PAGES).join(", ")}`;
     }
 
+    // For skills topics, always fetch OpenClaw index first for context
+    if (OPENCLAW_TOPICS.has(topic.toLowerCase())) {
+      await this.fetchOpenClawIndex();
+    }
+
+    const preferOpenClaw = OPENCLAW_TOPICS.has(topic.toLowerCase());
     const results: string[] = [];
     for (const page of pages.slice(0, 2)) { // Limit to 2 pages to avoid too much content
-      const content = await this.fetchPage(page);
-      results.push(`## ${page}\n\n${content.slice(0, 4000)}`);
+      const content = await this.fetchPage(page, preferOpenClaw);
+      const baseUrl = preferOpenClaw ? OPENCLAW_DOCS_BASE : DOCS_BASE;
+      results.push(`## ${baseUrl}${page}\n\n${content.slice(0, 4000)}`);
     }
     return results.join("\n\n---\n\n");
   }
@@ -113,10 +178,12 @@ class DocsFetcher {
     if (queryLower.includes("hook") || queryLower.includes("event")) relevantTopics.push("hooks");
     if (queryLower.includes("tool") || queryLower.includes("plugin")) relevantTopics.push("plugin", "tools");
     if (queryLower.includes("browser") || queryLower.includes("playwright")) relevantTopics.push("browser");
-    if (queryLower.includes("skill") || queryLower.includes("api")) relevantTopics.push("skills");
+    if (queryLower.includes("skill") || queryLower.includes("api") || queryLower.includes("agentskill")) relevantTopics.push("skills");
     if (queryLower.includes("agent") || queryLower.includes("prompt")) relevantTopics.push("agent");
     if (queryLower.includes("channel") || queryLower.includes("message")) relevantTopics.push("channels");
     if (queryLower.includes("cron") || queryLower.includes("schedule")) relevantTopics.push("automation");
+    if (queryLower.includes("clawdhub") || queryLower.includes("registry")) relevantTopics.push("clawdhub");
+    if (queryLower.includes("openclaw") || queryLower.includes("frontmatter") || queryLower.includes("metadata")) relevantTopics.push("skills");
 
     const uniqueTopics = [...new Set(relevantTopics)].slice(0, 3);
 
@@ -124,7 +191,16 @@ class DocsFetcher {
       return `No matching documentation found for: "${query}"\n\nAvailable topics: ${Object.keys(DOC_PAGES).join(", ")}`;
     }
 
+    // Always fetch OpenClaw index for context
+    const openclawIndex = await this.fetchOpenClawIndex();
+
     const results: string[] = [`# Documentation for: ${query}\n`];
+
+    // Include OpenClaw index summary if skills-related
+    if (uniqueTopics.some(t => OPENCLAW_TOPICS.has(t))) {
+      results.push(`## OpenClaw Documentation Index\n\n${openclawIndex.slice(0, 1500)}\n`);
+    }
+
     for (const topic of uniqueTopics) {
       const content = await this.fetchForTopic(topic);
       results.push(`## Topic: ${topic}\n\n${content.slice(0, 3000)}`);
@@ -231,26 +307,15 @@ const PLUGIN_JSON_TEMPLATE = `{
 }
 `;
 
-const SKILL_TEMPLATE = `# {{NAME}} Skill
+// OpenClaw/AgentSkills-compatible SKILL.md template
+// Format: YAML frontmatter + markdown content
+// See: https://docs.openclaw.ai/tools/skills
+const SKILL_TEMPLATE = `---
+name: {{NAME}}
+description: {{DESCRIPTION}}
+{{FRONTMATTER}}---
 
-{{DESCRIPTION}}
-
-## Endpoints
-
-{{ENDPOINTS}}
-
-## Usage
-
-\`\`\`typescript
-import { {{CLIENT_NAME}} } from "./api";
-
-const client = new {{CLIENT_NAME}}();
-// Use the client methods...
-\`\`\`
-
-## Auth
-
-{{AUTH_INFO}}
+{{CONTENT}}
 `;
 
 const API_CLIENT_TEMPLATE = `/**
@@ -276,6 +341,84 @@ export class {{CLIENT_NAME}} {
 export default {{CLIENT_NAME}};
 `;
 
+// Browser automation skill template - uses OpenClaw browser tool
+const BROWSER_SKILL_TEMPLATE = `---
+name: {{NAME}}
+description: {{DESCRIPTION}}
+{{FRONTMATTER}}---
+
+# {{DISPLAY_NAME}}
+
+{{DESCRIPTION}}
+
+## Browser Actions
+
+This skill uses the OpenClaw \`browser\` tool for web automation.
+
+### Available Actions
+
+The browser tool supports:
+- **Navigation**: \`browser open <url>\`, tab management
+- **Inspection**: \`browser snapshot\` (AI or ARIA format)
+- **Actions**: click, type, select using snapshot refs
+- **State**: cookies, headers, credentials, geolocation
+
+### Usage Pattern
+
+\`\`\`
+1. Open the target URL: browser open <url>
+2. Take a snapshot: browser snapshot
+3. Interact using refs from snapshot: browser click ref=<id>
+4. Verify state with another snapshot
+\`\`\`
+
+{{CONTENT}}
+
+## Authentication
+
+{{AUTH_SECTION}}
+
+## Notes
+
+- Use \`{baseDir}\` to reference files in this skill folder
+- The browser runs in the \`openclaw\` profile (isolated from personal browsing)
+- For sites with anti-bot detection, authenticate manually first
+`;
+
+// Hook template - HOOK.md + handler.ts pattern
+const HOOK_MD_TEMPLATE = `---
+name: {{NAME}}
+description: {{DESCRIPTION}}
+metadata: {{METADATA}}
+---
+
+# {{DISPLAY_NAME}}
+
+{{DESCRIPTION}}
+
+## Events
+
+This hook triggers on: {{EVENTS}}
+
+## Behavior
+
+{{CONTENT}}
+`;
+
+const HOOK_HANDLER_TEMPLATE = `/**
+ * {{NAME}} Hook Handler
+ * Auto-generated by Foundry
+ *
+ * Events: {{EVENTS}}
+ */
+
+import type { HookHandler, HookEvent } from "openclaw/hooks";
+
+{{CODE}}
+
+export default handler;
+`;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface LearningEntry {
@@ -287,14 +430,69 @@ interface LearningEntry {
   context?: string;
   timestamp: string;
   useCount: number;
-  // RISE: Multi-turn recursive introspection (arXiv:2407.18219)
-  attemptCount?: number;           // How many times this error pattern was encountered
-  improvementTrajectory?: number[]; // Success rate per attempt [0.2, 0.4, 0.8...]
-  // SelfEvolve: Interpreter feedback loop (arXiv:2306.02907)
-  executionFeedback?: string;      // Runtime/interpreter feedback for debugging
-  // HexMachina: Artifact-centric learning (arXiv:2506.04651)
-  crystallizedTo?: string;         // ID of hook/tool this pattern was converted to
-  crystallizedAt?: string;         // When pattern was promoted to code
+  // RISE (arXiv:2407.18219): Multi-turn recursive introspection
+  attemptCount?: number;
+  improvementTrajectory?: number[];
+  // SelfEvolve (arXiv:2306.02907): Interpreter feedback
+  executionFeedback?: string[];
+  // HexMachina (arXiv:2506.04651): Crystallization tracking
+  crystallizedTo?: string;
+  crystallizedAt?: string;
+}
+
+// Self-Improving Coding Agent (arXiv:2504.15228): Overseer report
+interface OverseerReport {
+  timestamp: string;
+  patternsAnalyzed: number;
+  crystallizationCandidates: LearningEntry[];
+  recurringFailures: { signature: string; count: number; entries: LearningEntry[] }[];
+  evolutionCandidates: ToolMetrics[]; // ADAS: Tools needing evolution
+  actionsExecuted: string[];
+}
+
+// ADAS (arXiv:2408.08435): Tool performance metrics
+interface ToolMetrics {
+  toolName: string;
+  successCount: number;
+  failureCount: number;
+  totalLatencyMs: number;
+  fitness: number;
+}
+
+// Outcome-based learning: track real-world feedback signals
+interface TaskOutcome {
+  id: string;
+  taskType: string; // "tiktok_post", "tweet", "linkedin_post", "email_campaign", etc.
+  taskDescription: string; // what was done
+  taskParams: Record<string, any>; // content, timing, hashtags, audience, etc.
+  executedAt: string;
+  feedbackCollectedAt?: string;
+  feedbackSource?: string; // "tiktok_analytics", "twitter_api", "manual", etc.
+  metrics: Record<string, number>; // views, likes, shares, comments, ctr, etc.
+  success?: boolean; // determined by threshold comparison
+  successThreshold?: Record<string, number>; // what counts as success
+  insights: string[]; // extracted learnings
+}
+
+interface TaskTypeInsights {
+  taskType: string;
+  totalTasks: number;
+  successfulTasks: number;
+  avgMetrics: Record<string, number>;
+  topPerformers: TaskOutcome[]; // top 3 by primary metric
+  patterns: {
+    successful: string[]; // what successful tasks have in common
+    unsuccessful: string[]; // what failed tasks have in common
+  };
+  recommendations: string[]; // actionable insights
+  lastUpdated: string;
+  // Auto-improvement: when patterns are strong enough, suggest skill modifications
+  improvementSuggestion?: {
+    confidence: number; // 0-1, based on sample size and pattern strength
+    targetSkill?: string; // skill to modify
+    suggestedChanges: string[]; // what to change
+    appliedAt?: string; // when improvement was applied
+  };
 }
 
 interface PendingSession {
@@ -302,18 +500,9 @@ interface PendingSession {
   channelId?: string;
   conversationId?: string;
   lastMessage: string;
-  reason?: string;                  // Why the session was saved
-  context?: string;                 // Additional context for resumption
-  createdAt?: string;               // When the pending session was created
-}
-
-// Self-Improving Coding Agent: Overseer report (arXiv:2504.15228)
-interface OverseerReport {
-  timestamp: string;
-  crystallizationCandidates: { id: string; tool: string; error: string; useCount: number }[];
-  stalePatterns: string[];
-  recurringFailures: { signature: string; count: number }[];
-  recommendations: string[];
+  context: string;
+  reason: string;
+  createdAt: string;
 }
 
 interface ExtensionDef {
@@ -339,12 +528,51 @@ interface HookDef {
   code: string;
 }
 
+// OpenClaw/AgentSkills-compatible skill metadata
+interface SkillMetadata {
+  openclaw?: {
+    always?: boolean;
+    emoji?: string;
+    homepage?: string;
+    os?: ("darwin" | "linux" | "win32")[];
+    primaryEnv?: string;
+    skillKey?: string;
+    requires?: {
+      bins?: string[];
+      anyBins?: string[];
+      env?: string[];
+      config?: string[];
+    };
+    install?: {
+      id: string;
+      kind: "brew" | "node" | "go" | "uv" | "download";
+      formula?: string;
+      package?: string;
+      bins?: string[];
+      label?: string;
+      url?: string;
+      os?: ("darwin" | "linux" | "win32")[];
+    }[];
+  };
+}
+
 interface SkillDef {
   name: string;
   description: string;
-  baseUrl: string;
-  endpoints: EndpointDef[];
+  // OpenClaw frontmatter options
+  homepage?: string;
+  userInvocable?: boolean; // default: true
+  disableModelInvocation?: boolean; // default: false
+  commandDispatch?: "tool";
+  commandTool?: string;
+  commandArgMode?: "raw";
+  metadata?: SkillMetadata;
+  // Legacy API-based skill support (optional)
+  baseUrl?: string;
+  endpoints?: EndpointDef[];
   authHeaders?: Record<string, string>;
+  // Skill content (markdown body after frontmatter)
+  content?: string;
   createdAt: string;
 }
 
@@ -355,6 +583,51 @@ interface EndpointDef {
   params?: Record<string, string>;
 }
 
+// Browser skill definition - for browser automation skills
+interface BrowserSkillDef {
+  name: string;
+  description: string;
+  // Target site/service
+  targetUrl?: string;
+  // Browser actions to document
+  actions?: {
+    name: string;
+    description: string;
+    steps?: string[];
+  }[];
+  // Authentication approach
+  authMethod?: "manual" | "cookie" | "header" | "oauth";
+  authNotes?: string;
+  // OpenClaw metadata
+  metadata?: SkillMetadata;
+  // Custom content
+  content?: string;
+  createdAt?: string;
+}
+
+// Hook definition - for event-driven automation
+interface OpenClawHookDef {
+  name: string;
+  description: string;
+  // Events to trigger on
+  events: ("command:new" | "command:reset" | "command:stop" | "agent:bootstrap" | "gateway:startup" | "tool_result_persist")[];
+  // Hook code (handler function body)
+  code: string;
+  // OpenClaw metadata
+  metadata?: {
+    openclaw?: {
+      emoji?: string;
+      requires?: {
+        bins?: string[];
+        env?: string[];
+        config?: string[];
+      };
+      always?: boolean;
+    };
+  };
+  createdAt?: string;
+}
+
 // ── Extension Writer ─────────────────────────────────────────────────────────
 
 class CodeWriter {
@@ -362,22 +635,22 @@ class CodeWriter {
   private skillsDir: string;
   private manifestPath: string;
   private manifest: { extensions: ExtensionDef[]; skills: SkillDef[] } = { extensions: [], skills: [] };
-  private clawdbotDocs: { plugin: string; hooks: string } = { plugin: "", hooks: "" };
+  private openclawDocs: { plugin: string; hooks: string } = { plugin: "", hooks: "" };
 
   constructor(
     private dataDir: string,
-    private clawdbotPath: string,
+    private openclawPath: string,
     private logger?: { info: (msg: string) => void },
   ) {
-    this.extensionsDir = join(homedir(), ".clawdbot", "extensions");
-    this.skillsDir = join(homedir(), ".clawdbot", "skills");
+    this.extensionsDir = join(homedir(), ".openclaw", "extensions");
+    this.skillsDir = join(homedir(), ".openclaw", "skills");
     this.manifestPath = join(dataDir, "manifest.json");
 
     if (!existsSync(this.extensionsDir)) mkdirSync(this.extensionsDir, { recursive: true });
     if (!existsSync(this.skillsDir)) mkdirSync(this.skillsDir, { recursive: true });
 
     this.loadManifest();
-    this.loadClawdbotDocs();
+    this.loadOpenClawDocs();
   }
 
   private loadManifest(): void {
@@ -401,22 +674,22 @@ class CodeWriter {
     writeFileSync(this.manifestPath, JSON.stringify(this.manifest, null, 2));
   }
 
-  private loadClawdbotDocs(): void {
-    const pluginDocPath = join(this.clawdbotPath, "docs", "plugin.md");
-    const hooksDocPath = join(this.clawdbotPath, "docs", "hooks.md");
+  private loadOpenClawDocs(): void {
+    const pluginDocPath = join(this.openclawPath, "docs", "plugin.md");
+    const hooksDocPath = join(this.openclawPath, "docs", "hooks.md");
 
     if (existsSync(pluginDocPath)) {
-      this.clawdbotDocs.plugin = readFileSync(pluginDocPath, "utf-8");
+      this.openclawDocs.plugin = readFileSync(pluginDocPath, "utf-8");
       this.logger?.info("[foundry] Loaded plugin docs");
     }
     if (existsSync(hooksDocPath)) {
-      this.clawdbotDocs.hooks = readFileSync(hooksDocPath, "utf-8");
+      this.openclawDocs.hooks = readFileSync(hooksDocPath, "utf-8");
       this.logger?.info("[foundry] Loaded hooks docs");
     }
   }
 
   getDocs(): { plugin: string; hooks: string } {
-    return this.clawdbotDocs;
+    return this.openclawDocs;
   }
 
   // ── Extension Writing ─────────────────────────────────────────────────────
@@ -490,7 +763,7 @@ class CodeWriter {
 
     writeFileSync(join(extDir, "index.ts"), extensionCode);
     writeFileSync(
-      join(extDir, "clawdbot.plugin.json"),
+      join(extDir, "openclaw.plugin.json"),
       PLUGIN_JSON_TEMPLATE
         .replace(/\{\{ID\}\}/g, def.id)
         .replace(/\{\{NAME\}\}/g, def.name)
@@ -522,7 +795,7 @@ class CodeWriter {
     return true;
   }
 
-  // ── Skill Writing ─────────────────────────────────────────────────────────
+  // ── Skill Writing (OpenClaw/AgentSkills-compatible) ─────────────────────────
 
   writeSkill(def: Omit<SkillDef, "createdAt">): string {
     const full: SkillDef = { ...def, createdAt: new Date().toISOString() };
@@ -530,65 +803,119 @@ class CodeWriter {
 
     if (!existsSync(skillDir)) mkdirSync(skillDir, { recursive: true });
 
-    // Generate SKILL.md
-    const endpointsDoc = def.endpoints
-      .map(e => `- \`${e.method} ${e.path}\` — ${e.description}`)
-      .join("\n");
+    // Build YAML frontmatter (AgentSkills-compatible, single-line JSON for metadata)
+    const frontmatterLines: string[] = [];
 
+    // Optional frontmatter fields
+    if (def.homepage) {
+      frontmatterLines.push(`homepage: ${def.homepage}`);
+    }
+    if (def.userInvocable === false) {
+      frontmatterLines.push(`user-invocable: false`);
+    }
+    if (def.disableModelInvocation === true) {
+      frontmatterLines.push(`disable-model-invocation: true`);
+    }
+    if (def.commandDispatch) {
+      frontmatterLines.push(`command-dispatch: ${def.commandDispatch}`);
+    }
+    if (def.commandTool) {
+      frontmatterLines.push(`command-tool: ${def.commandTool}`);
+    }
+    if (def.commandArgMode) {
+      frontmatterLines.push(`command-arg-mode: ${def.commandArgMode}`);
+    }
+
+    // Metadata must be single-line JSON per OpenClaw spec
+    if (def.metadata) {
+      frontmatterLines.push(`metadata: ${JSON.stringify(def.metadata)}`);
+    }
+
+    const frontmatter = frontmatterLines.length > 0
+      ? frontmatterLines.join("\n") + "\n"
+      : "";
+
+    // Build skill content
+    let content = def.content || "";
+
+    // If legacy API-based skill, generate content from endpoints
+    if (def.baseUrl && def.endpoints && def.endpoints.length > 0) {
+      const endpointsDoc = def.endpoints
+        .map(e => `- \`${e.method} ${e.path}\` — ${e.description}`)
+        .join("\n");
+
+      content = `## Endpoints
+
+${endpointsDoc}
+
+## Usage
+
+\`\`\`typescript
+import { ${toPascalCase(def.name)}Client } from "./api";
+
+const client = new ${toPascalCase(def.name)}Client();
+// Use the client methods...
+\`\`\`
+
+## Auth
+
+${def.authHeaders ? "Auth headers stored in auth.json" : "No auth required"}`;
+
+      // Generate api.ts for API-based skills
+      const methods = def.endpoints.map(e => {
+        const methodName = toMethodName(e.method, e.path);
+        const pathParams = (e.path.match(/\{(\w+)\}/g) || []).map(p => p.slice(1, -1));
+
+        let methodCode = `  async ${methodName}(`;
+        if (pathParams.length > 0) {
+          methodCode += pathParams.map(p => `${p}: string`).join(", ");
+        }
+        if (e.method !== "GET" && e.method !== "DELETE") {
+          methodCode += pathParams.length > 0 ? ", body?: any" : "body?: any";
+        }
+        methodCode += `) {\n`;
+
+        let urlCode = `\`\${BASE_URL}${e.path}\``;
+        for (const p of pathParams) {
+          urlCode = urlCode.replace(`{${p}}`, `\${${p}}`);
+        }
+
+        methodCode += `    const url = ${urlCode};\n`;
+        methodCode += `    const res = await fetch(url, {\n`;
+        methodCode += `      method: "${e.method}",\n`;
+        methodCode += `      headers: this.headers,\n`;
+        if (e.method !== "GET" && e.method !== "DELETE") {
+          methodCode += `      body: body ? JSON.stringify(body) : undefined,\n`;
+        }
+        methodCode += `    });\n`;
+        methodCode += `    return res.json();\n`;
+        methodCode += `  }\n`;
+
+        return methodCode;
+      }).join("\n");
+
+      const apiTs = API_CLIENT_TEMPLATE
+        .replace(/\{\{NAME\}\}/g, def.name)
+        .replace(/\{\{BASE_URL\}\}/g, def.baseUrl)
+        .replace(/\{\{CLIENT_NAME\}\}/g, toPascalCase(def.name) + "Client")
+        .replace(/\{\{METHODS\}\}/g, methods);
+
+      writeFileSync(join(skillDir, "api.ts"), apiTs);
+
+      // Save auth if provided
+      if (def.authHeaders) {
+        writeFileSync(join(skillDir, "auth.json"), JSON.stringify({ headers: def.authHeaders }, null, 2));
+      }
+    }
+
+    // Generate SKILL.md with proper OpenClaw/AgentSkills format
     const skillMd = SKILL_TEMPLATE
       .replace(/\{\{NAME\}\}/g, def.name)
       .replace(/\{\{DESCRIPTION\}\}/g, def.description)
-      .replace(/\{\{ENDPOINTS\}\}/g, endpointsDoc)
-      .replace(/\{\{CLIENT_NAME\}\}/g, toPascalCase(def.name) + "Client")
-      .replace(/\{\{AUTH_INFO\}\}/g, def.authHeaders ? "Auth headers stored in auth.json" : "No auth required");
+      .replace(/\{\{FRONTMATTER\}\}/g, frontmatter)
+      .replace(/\{\{CONTENT\}\}/g, content);
 
     writeFileSync(join(skillDir, "SKILL.md"), skillMd);
-
-    // Generate api.ts
-    const methods = def.endpoints.map(e => {
-      const methodName = toMethodName(e.method, e.path);
-      const pathParams = (e.path.match(/\{(\w+)\}/g) || []).map(p => p.slice(1, -1));
-
-      let methodCode = `  async ${methodName}(`;
-      if (pathParams.length > 0) {
-        methodCode += pathParams.map(p => `${p}: string`).join(", ");
-      }
-      if (e.method !== "GET" && e.method !== "DELETE") {
-        methodCode += pathParams.length > 0 ? ", body?: any" : "body?: any";
-      }
-      methodCode += `) {\n`;
-
-      let urlCode = `\`\${BASE_URL}${e.path}\``;
-      for (const p of pathParams) {
-        urlCode = urlCode.replace(`{${p}}`, `\${${p}}`);
-      }
-
-      methodCode += `    const url = ${urlCode};\n`;
-      methodCode += `    const res = await fetch(url, {\n`;
-      methodCode += `      method: "${e.method}",\n`;
-      methodCode += `      headers: this.headers,\n`;
-      if (e.method !== "GET" && e.method !== "DELETE") {
-        methodCode += `      body: body ? JSON.stringify(body) : undefined,\n`;
-      }
-      methodCode += `    });\n`;
-      methodCode += `    return res.json();\n`;
-      methodCode += `  }\n`;
-
-      return methodCode;
-    }).join("\n");
-
-    const apiTs = API_CLIENT_TEMPLATE
-      .replace(/\{\{NAME\}\}/g, def.name)
-      .replace(/\{\{BASE_URL\}\}/g, def.baseUrl)
-      .replace(/\{\{CLIENT_NAME\}\}/g, toPascalCase(def.name) + "Client")
-      .replace(/\{\{METHODS\}\}/g, methods);
-
-    writeFileSync(join(skillDir, "api.ts"), apiTs);
-
-    // Save auth if provided
-    if (def.authHeaders) {
-      writeFileSync(join(skillDir, "auth.json"), JSON.stringify({ headers: def.authHeaders }, null, 2));
-    }
 
     const idx = this.manifest.skills.findIndex(s => s.name === def.name);
     if (idx >= 0) this.manifest.skills[idx] = full;
@@ -597,6 +924,117 @@ class CodeWriter {
 
     this.logger?.info(`[foundry] Wrote skill: ${def.name}`);
     return skillDir;
+  }
+
+  // ── Browser Skill Writing ─────────────────────────────────────────────────
+
+  writeBrowserSkill(def: BrowserSkillDef): string {
+    const skillDir = join(this.skillsDir, def.name.toLowerCase().replace(/\s+/g, "-"));
+    if (!existsSync(skillDir)) mkdirSync(skillDir, { recursive: true });
+
+    // Build frontmatter
+    const frontmatterLines: string[] = [];
+
+    // Browser skills require browser.enabled config
+    const metadata = def.metadata || {};
+    if (!metadata.openclaw) metadata.openclaw = {};
+    if (!metadata.openclaw.requires) metadata.openclaw.requires = {};
+    if (!metadata.openclaw.requires.config) metadata.openclaw.requires.config = [];
+    if (!metadata.openclaw.requires.config.includes("browser.enabled")) {
+      metadata.openclaw.requires.config.push("browser.enabled");
+    }
+
+    frontmatterLines.push(`metadata: ${JSON.stringify(metadata)}`);
+
+    const frontmatter = frontmatterLines.join("\n") + "\n";
+
+    // Build actions content
+    let actionsContent = "";
+    if (def.actions && def.actions.length > 0) {
+      actionsContent = "### Documented Actions\n\n";
+      for (const action of def.actions) {
+        actionsContent += `#### ${action.name}\n\n${action.description}\n\n`;
+        if (action.steps && action.steps.length > 0) {
+          actionsContent += "Steps:\n";
+          action.steps.forEach((step, i) => {
+            actionsContent += `${i + 1}. ${step}\n`;
+          });
+          actionsContent += "\n";
+        }
+      }
+    }
+
+    // Build auth section
+    let authSection = "No special authentication required.";
+    if (def.authMethod === "manual") {
+      authSection = `**Manual Login Required**\n\nSign in to ${def.targetUrl || "the target site"} in the openclaw browser profile before using this skill.\n\n${def.authNotes || ""}`;
+    } else if (def.authMethod === "cookie") {
+      authSection = `**Cookie-based Authentication**\n\nCookies are preserved in the browser profile.\n\n${def.authNotes || ""}`;
+    } else if (def.authMethod === "header") {
+      authSection = `**Header-based Authentication**\n\nSet auth headers via browser tool state management.\n\n${def.authNotes || ""}`;
+    } else if (def.authMethod === "oauth") {
+      authSection = `**OAuth Authentication**\n\nUse auth-profiles for OAuth token management.\n\n${def.authNotes || ""}`;
+    }
+
+    // Combine custom content
+    const fullContent = `${actionsContent}${def.content || ""}`.trim();
+
+    // Generate SKILL.md
+    const skillMd = BROWSER_SKILL_TEMPLATE
+      .replace(/\{\{NAME\}\}/g, def.name)
+      .replace(/\{\{DISPLAY_NAME\}\}/g, toPascalCase(def.name.replace(/-/g, " ")))
+      .replace(/\{\{DESCRIPTION\}\}/g, def.description)
+      .replace(/\{\{FRONTMATTER\}\}/g, frontmatter)
+      .replace(/\{\{CONTENT\}\}/g, fullContent)
+      .replace(/\{\{AUTH_SECTION\}\}/g, authSection);
+
+    writeFileSync(join(skillDir, "SKILL.md"), skillMd);
+
+    this.logger?.info(`[foundry] Wrote browser skill: ${def.name}`);
+    return skillDir;
+  }
+
+  // ── Hook Writing ──────────────────────────────────────────────────────────
+
+  writeHook(def: OpenClawHookDef): string {
+    const hooksDir = join(homedir(), ".openclaw", "hooks");
+    const hookDir = join(hooksDir, def.name.toLowerCase().replace(/\s+/g, "-"));
+    if (!existsSync(hookDir)) mkdirSync(hookDir, { recursive: true });
+
+    // Build metadata - events go at openclaw level per hook spec
+    const metadata: Record<string, any> = def.metadata || {};
+    if (!metadata.openclaw) metadata.openclaw = {};
+    (metadata.openclaw as any).events = def.events;
+
+    const metadataJson = JSON.stringify(metadata);
+    const eventsStr = def.events.join(", ");
+
+    // Generate HOOK.md
+    const hookMd = HOOK_MD_TEMPLATE
+      .replace(/\{\{NAME\}\}/g, def.name)
+      .replace(/\{\{DISPLAY_NAME\}\}/g, toPascalCase(def.name.replace(/-/g, " ")))
+      .replace(/\{\{DESCRIPTION\}\}/g, def.description)
+      .replace(/\{\{METADATA\}\}/g, metadataJson)
+      .replace(/\{\{EVENTS\}\}/g, eventsStr)
+      .replace(/\{\{CONTENT\}\}/g, def.code ? "Custom handler logic implemented below." : "No custom behavior defined.");
+
+    writeFileSync(join(hookDir, "HOOK.md"), hookMd);
+
+    // Generate handler.ts
+    const handlerCode = def.code || `const handler: HookHandler = async (event: HookEvent) => {
+  // Event type: ${eventsStr}
+  console.log("[${def.name}] Hook triggered:", event.type, event.action);
+};`;
+
+    const handlerTs = HOOK_HANDLER_TEMPLATE
+      .replace(/\{\{NAME\}\}/g, def.name)
+      .replace(/\{\{EVENTS\}\}/g, eventsStr)
+      .replace(/\{\{CODE\}\}/g, handlerCode);
+
+    writeFileSync(join(hookDir, "handler.ts"), handlerTs);
+
+    this.logger?.info(`[foundry] Wrote hook: ${def.name}`);
+    return hookDir;
   }
 
   // ── Getters ───────────────────────────────────────────────────────────────
@@ -619,8 +1057,18 @@ class CodeWriter {
 class LearningEngine {
   private learningsPath: string;
   private pendingSessionPath: string;
+  private metricsPath: string;
+  private outcomesPath: string;
+  private insightsPath: string;
   private learnings: LearningEntry[] = [];
   private pendingSession: PendingSession | null = null;
+  private toolMetrics: Map<string, ToolMetrics> = new Map();
+  private overseerInterval: NodeJS.Timeout | null = null;
+  private lastOverseerReport: OverseerReport | null = null;
+  // Outcome-based learning
+  private outcomes: TaskOutcome[] = [];
+  private taskTypeInsights: Map<string, TaskTypeInsights> = new Map();
+  private feedbackCollectionInterval: NodeJS.Timeout | null = null;
 
   constructor(
     private dataDir: string,
@@ -628,10 +1076,52 @@ class LearningEngine {
   ) {
     this.learningsPath = join(dataDir, "learnings.json");
     this.pendingSessionPath = join(dataDir, "pending-session.json");
+    this.metricsPath = join(dataDir, "metrics.json");
+    this.outcomesPath = join(dataDir, "outcomes.json");
+    this.insightsPath = join(dataDir, "task-insights.json");
 
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
     this.loadLearnings();
     this.loadPendingSession();
+    this.loadOutcomes();
+    this.loadMetrics();
+  }
+
+  private loadMetrics(): void {
+    if (existsSync(this.metricsPath)) {
+      try {
+        const data = JSON.parse(readFileSync(this.metricsPath, "utf-8"));
+        this.toolMetrics = new Map(Object.entries(data));
+      } catch {
+        this.toolMetrics = new Map();
+      }
+    }
+  }
+
+  private saveMetrics(): void {
+    const obj = Object.fromEntries(this.toolMetrics);
+    writeFileSync(this.metricsPath, JSON.stringify(obj, null, 2));
+  }
+
+  // ADAS: Record tool execution for fitness tracking
+  recordToolExecution(toolName: string, success: boolean, latencyMs: number): void {
+    let metrics = this.toolMetrics.get(toolName);
+    if (!metrics) {
+      metrics = { toolName, successCount: 0, failureCount: 0, totalLatencyMs: 0, fitness: 0.5 };
+    }
+    if (success) metrics.successCount++; else metrics.failureCount++;
+    metrics.totalLatencyMs += latencyMs;
+    metrics.fitness = metrics.successCount / (metrics.successCount + metrics.failureCount);
+    this.toolMetrics.set(toolName, metrics);
+    this.saveMetrics();
+  }
+
+  getToolFitness(toolName: string): number {
+    return this.toolMetrics.get(toolName)?.fitness ?? 0.5;
+  }
+
+  getAllToolMetrics(): ToolMetrics[] {
+    return Array.from(this.toolMetrics.values());
   }
 
   private loadLearnings(): void {
@@ -662,13 +1152,42 @@ class LearningEngine {
   }
 
   // ── Learning from failures ───────────────────────────────────────────────
-  // Implements RISE: Recursive Introspection (arXiv:2407.18219)
-  // Track attempts per error pattern to enable multi-turn self-improvement
+  // RISE (arXiv:2407.18219): Recursive introspection with attempt tracking
+
+  private extractErrorSignature(error: string): string {
+    return error
+      .replace(/\d+/g, "N")
+      .replace(/0x[a-f0-9]+/gi, "ADDR")
+      .replace(/["'][^"']*["']/g, "STR")
+      .replace(/at .*:\d+:\d+/g, "at LOCATION")
+      .slice(0, 150);
+  }
+
+  findSimilarPattern(tool: string, error: string): LearningEntry | undefined {
+    const signature = this.extractErrorSignature(error);
+    return this.learnings.find(l =>
+      l.type === "pattern" &&
+      l.tool === tool &&
+      l.error &&
+      this.extractErrorSignature(l.error) === signature
+    );
+  }
+
+  private findSimilarFailure(tool: string, error: string): LearningEntry | undefined {
+    const signature = this.extractErrorSignature(error);
+    return this.learnings.find(l =>
+      l.type === "failure" &&
+      l.tool === tool &&
+      l.error &&
+      this.extractErrorSignature(l.error) === signature
+    );
+  }
 
   recordFailure(tool: string, error: string, context?: string, executionFeedback?: string): string {
-    // RISE: Check for similar past failures to track attempt count
-    const similarPattern = this.findSimilarFailure(tool, error);
-    const attemptCount = similarPattern ? (similarPattern.attemptCount || 1) + 1 : 1;
+    // RISE: Check for similar past failures to track attempt progression
+    const similar = this.findSimilarFailure(tool, error);
+    const attemptCount = similar ? (similar.attemptCount || 0) + 1 : 1;
+    const trajectory = similar ? [...(similar.improvementTrajectory || []), 0] : [0];
 
     const id = `fail_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const entry: LearningEntry = {
@@ -680,101 +1199,248 @@ class LearningEngine {
       timestamp: new Date().toISOString(),
       useCount: 0,
       attemptCount,
-      executionFeedback, // SelfEvolve: Store interpreter feedback
-      improvementTrajectory: similarPattern?.improvementTrajectory || [],
+      improvementTrajectory: trajectory,
+      executionFeedback: executionFeedback ? [executionFeedback] : [],
     };
     this.learnings.push(entry);
     this.saveLearnings();
 
-    // RISE: Log attempt progression
     if (attemptCount > 1) {
-      this.logger?.info(`[foundry] Recorded failure (attempt #${attemptCount}): ${tool} - ${error.slice(0, 50)}...`);
+      this.logger?.info(`[foundry] RISE: Attempt #${attemptCount} for ${tool} - ${error.slice(0, 40)}...`);
     } else {
       this.logger?.info(`[foundry] Recorded failure: ${tool} - ${error.slice(0, 50)}...`);
     }
     return id;
   }
 
-  // RISE: Find similar past failures for recursive introspection
-  private findSimilarFailure(tool: string, error: string): LearningEntry | undefined {
-    const errorSignature = this.extractErrorSignature(error);
-    return this.learnings.find(l =>
-      l.type === "failure" &&
-      l.tool === tool &&
-      l.error &&
-      this.extractErrorSignature(l.error) === errorSignature
-    );
-  }
-
-  // Extract stable error signature for pattern matching
-  private extractErrorSignature(error: string): string {
-    return error
-      .replace(/\d+/g, "N")           // Normalize numbers
-      .replace(/0x[a-f0-9]+/gi, "ADDR") // Normalize addresses
-      .replace(/["'][^"']*["']/g, "STR") // Normalize strings
-      .slice(0, 100);                   // Limit length
+  // SelfEvolve: Add interpreter feedback to existing failure
+  addExecutionFeedback(failureId: string, feedback: string): void {
+    const entry = this.learnings.find(l => l.id === failureId);
+    if (entry) {
+      entry.executionFeedback = entry.executionFeedback || [];
+      entry.executionFeedback.push(feedback);
+      this.saveLearnings();
+    }
   }
 
   recordResolution(failureId: string, resolution: string): void {
     const entry = this.learnings.find(l => l.id === failureId);
     if (entry) {
       entry.resolution = resolution;
-      entry.type = "pattern"; // Upgrade to pattern once resolved
-
-      // RISE: Update improvement trajectory
-      // Track success (1.0) at this attempt count
-      if (!entry.improvementTrajectory) entry.improvementTrajectory = [];
-      const attemptIdx = (entry.attemptCount || 1) - 1;
-      while (entry.improvementTrajectory.length <= attemptIdx) {
-        entry.improvementTrajectory.push(0);
+      entry.type = "pattern";
+      // RISE: Mark success in trajectory
+      if (entry.improvementTrajectory && entry.improvementTrajectory.length > 0) {
+        const lastIdx = entry.improvementTrajectory.length - 1;
+        entry.improvementTrajectory[lastIdx] = 1.0;
       }
-      entry.improvementTrajectory[attemptIdx] = 1.0;
-
       this.saveLearnings();
-      this.logger?.info(`[foundry] Recorded resolution for ${failureId} (attempt #${entry.attemptCount || 1})`);
-
-      // Self-Improving Coding Agent: Check if pattern should be auto-crystallized
-      this.checkCrystallization(entry);
+      this.logger?.info(`[foundry] Pattern created (attempt #${entry.attemptCount || 1}): ${entry.tool}`);
     }
   }
 
-  // HexMachina + Self-Improving Coding Agent: Auto-crystallize high-value patterns
-  // (arXiv:2506.04651, arXiv:2504.15228)
-  private checkCrystallization(pattern: LearningEntry): void {
-    // Crystallize if:
-    // 1. Pattern has been used 3+ times (validated usefulness)
-    // 2. Not already crystallized
-    // 3. Has a clear resolution
-    if (
+  // HexMachina: Check if pattern should be crystallized
+  shouldCrystallize(pattern: LearningEntry): boolean {
+    return (
+      pattern.type === "pattern" &&
       pattern.useCount >= 3 &&
       !pattern.crystallizedTo &&
-      pattern.resolution &&
-      pattern.tool
-    ) {
-      this.logger?.info(`[foundry] Pattern ${pattern.id} ready for crystallization (used ${pattern.useCount} times)`);
-      // Mark as ready - actual crystallization happens via foundry_crystallize tool or auto-hook
-      pattern.crystallizedAt = "pending";
-    }
-  }
-
-  // Get patterns ready for crystallization
-  getCrystallizationCandidates(): LearningEntry[] {
-    return this.learnings.filter(l =>
-      l.type === "pattern" &&
-      l.useCount >= 3 &&
-      !l.crystallizedTo &&
-      l.resolution
+      !!pattern.resolution
     );
   }
 
-  // Mark pattern as crystallized (called after hook/tool is written)
+  getCrystallizationCandidates(): LearningEntry[] {
+    return this.learnings.filter(l => this.shouldCrystallize(l));
+  }
+
   markCrystallized(patternId: string, artifactId: string): void {
     const entry = this.learnings.find(l => l.id === patternId);
     if (entry) {
       entry.crystallizedTo = artifactId;
       entry.crystallizedAt = new Date().toISOString();
       this.saveLearnings();
-      this.logger?.info(`[foundry] Crystallized pattern ${patternId} → ${artifactId}`);
+      this.logger?.info(`[foundry] HexMachina: Crystallized ${patternId} → ${artifactId}`);
+    }
+  }
+
+  // RISE: Calculate pattern effectiveness score
+  calculatePatternScore(entry: LearningEntry): number {
+    let score = entry.useCount || 0;
+    const trajectory = entry.improvementTrajectory || [];
+    if (trajectory.length > 0) {
+      const avgSuccess = trajectory.reduce((a, b) => a + b, 0) / trajectory.length;
+      score += avgSuccess * 5;
+    }
+    if (entry.crystallizedTo) score += 10;
+    return score;
+  }
+
+  recordPatternUse(patternId: string): void {
+    const entry = this.learnings.find(l => l.id === patternId);
+    if (entry) {
+      entry.useCount = (entry.useCount || 0) + 1;
+      this.saveLearnings();
+    }
+  }
+
+  // RISE: Record that a pattern-assisted retry succeeded
+  recordPatternSuccess(patternId: string): void {
+    const entry = this.learnings.find(l => l.id === patternId);
+    if (entry) {
+      // Update improvement trajectory to show success
+      if (!entry.improvementTrajectory) entry.improvementTrajectory = [];
+      entry.improvementTrajectory.push(1.0);
+      this.saveLearnings();
+      this.logger?.info(`[foundry] RISE: Pattern ${patternId} success recorded (trajectory: ${entry.improvementTrajectory.length})`);
+    }
+  }
+
+  // RISE: Check if pattern should auto-crystallize based on successful uses
+  shouldAutoCrystallize(pattern: LearningEntry): boolean {
+    if (pattern.crystallizedTo) return false; // Already crystallized
+    if (!pattern.resolution) return false; // No resolution to crystallize
+
+    // Auto-crystallize after 3 successful RISE-assisted retries
+    const trajectory = pattern.improvementTrajectory || [];
+    const successCount = trajectory.filter(v => v === 1.0).length;
+    return successCount >= 3;
+  }
+
+  // Get a specific pattern by ID
+  getPattern(patternId: string): LearningEntry | undefined {
+    return this.learnings.find(l => l.id === patternId);
+  }
+
+  // Get all learnings
+  getAll(): LearningEntry[] {
+    return this.learnings;
+  }
+
+  // Self-Improving Coding Agent: Overseer mechanism
+  // Takes AUTONOMOUS ACTION - not just reporting
+  runOverseer(dataDir?: string): OverseerReport {
+    const report: OverseerReport = {
+      timestamp: new Date().toISOString(),
+      patternsAnalyzed: this.learnings.filter(l => l.type === "pattern").length,
+      crystallizationCandidates: this.getCrystallizationCandidates(),
+      recurringFailures: [],
+      evolutionCandidates: [],
+      actionsExecuted: [],
+    };
+
+    // ADAS: Identify underperforming tools for evolution
+    const EVOLUTION_THRESHOLD = 0.4; // Tools below 40% fitness
+    const MIN_SAMPLES = 5; // Need at least 5 executions
+    for (const [toolName, metrics] of this.toolMetrics) {
+      const totalCalls = metrics.successCount + metrics.failureCount;
+      if (totalCalls >= MIN_SAMPLES && metrics.fitness < EVOLUTION_THRESHOLD) {
+        report.evolutionCandidates.push(metrics);
+      }
+    }
+
+    // Find recurring failures (same error signature 3+ times without resolution)
+    const failureCounts = new Map<string, LearningEntry[]>();
+    for (const l of this.learnings.filter(l => l.type === "failure" && !l.resolution)) {
+      const sig = `${l.tool}:${this.extractErrorSignature(l.error || "")}`;
+      const existing = failureCounts.get(sig) || [];
+      existing.push(l);
+      failureCounts.set(sig, existing);
+    }
+
+    for (const [sig, entries] of failureCounts) {
+      if (entries.length >= 3) {
+        report.recurringFailures.push({ signature: sig, count: entries.length, entries });
+      }
+    }
+
+    // AUTONOMOUS ACTION 1: Auto-crystallize high-value patterns
+    // Only when we have a dataDir to write hooks to
+    if (dataDir) {
+      const hooksDir = join(dataDir, "hooks");
+      if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true });
+
+      for (const candidate of report.crystallizationCandidates) {
+        // Auto-crystallize patterns that have been used 5+ times (very high value)
+        if (candidate.useCount >= 5 && candidate.resolution) {
+          const hookId = `auto_crystallized_${candidate.tool}_${Date.now()}`;
+          const escapedError = (candidate.error || "").replace(/`/g, "'").slice(0, 100);
+          const escapedResolution = (candidate.resolution || "").replace(/`/g, "'").slice(0, 200);
+
+          const hookCode = `
+    // Auto-crystallized by Overseer from pattern: ${candidate.id}
+    api.on("before_tool_call", async (event, ctx) => {
+      if (event.toolName === "${candidate.tool}") {
+        // Original error: ${escapedError}
+        // Learned resolution: ${escapedResolution}
+        if (ctx?.injectSystemMessage) {
+          ctx.injectSystemMessage(\`
+[AUTO-CRYSTALLIZED PATTERN]
+Before calling ${candidate.tool}, apply this learned approach:
+${escapedResolution}
+\`);
+        }
+      }
+    });`;
+
+          const hookPath = join(hooksDir, `${hookId}.ts`);
+          writeFileSync(hookPath, hookCode);
+          this.markCrystallized(candidate.id, hookId);
+          report.actionsExecuted.push(`Auto-crystallized pattern ${candidate.id} → ${hookId}`);
+        }
+      }
+    }
+
+    // AUTONOMOUS ACTION 2: Prune stale patterns (no uses in 30 days, never crystallized)
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const stalePruned = this.learnings.filter(l => {
+      if (l.type !== "pattern" || l.crystallizedTo) return false;
+      const ts = new Date(l.timestamp).getTime();
+      return ts < thirtyDaysAgo && (l.useCount || 0) === 0;
+    });
+
+    if (stalePruned.length > 0) {
+      this.learnings = this.learnings.filter(l => !stalePruned.includes(l));
+      this.saveLearnings();
+      report.actionsExecuted.push(`Pruned ${stalePruned.length} stale patterns`);
+    }
+
+    // AUTONOMOUS ACTION 3: Consolidate duplicate failures into patterns
+    for (const { signature, count, entries } of report.recurringFailures) {
+      if (count >= 5) {
+        // This failure is recurring enough to warrant attention
+        // Create an insight about it
+        const latest = entries[entries.length - 1];
+        this.recordInsight(
+          `Recurring failure (${count}x): ${signature.slice(0, 80)}`,
+          `Tool: ${latest.tool}, Error: ${latest.error?.slice(0, 100)}`
+        );
+        report.actionsExecuted.push(`Created insight for recurring failure: ${signature.slice(0, 50)}...`);
+      }
+    }
+
+    this.logger?.info(`[foundry] Overseer: ${report.patternsAnalyzed} patterns, ${report.crystallizationCandidates.length} candidates, ${report.recurringFailures.length} recurring failures, ${report.evolutionCandidates.length} evolution candidates, ${report.actionsExecuted.length} actions taken`);
+
+    // Save report for proactive evolution injection
+    this.lastOverseerReport = report;
+    return report;
+  }
+
+  getLastOverseerReport(): OverseerReport | null {
+    return this.lastOverseerReport;
+  }
+
+  // Start autonomous overseer
+  startOverseer(intervalMs = 60 * 60 * 1000, dataDir?: string): void {
+    if (this.overseerInterval) return;
+    this.overseerInterval = setInterval(() => {
+      this.runOverseer(dataDir);
+    }, intervalMs);
+    this.logger?.info(`[foundry] Autonomous overseer started (interval: ${intervalMs}ms)`);
+  }
+
+  stopOverseer(): void {
+    if (this.overseerInterval) {
+      clearInterval(this.overseerInterval);
+      this.overseerInterval = null;
     }
   }
 
@@ -813,7 +1479,7 @@ class LearningEngine {
   }
 
   // ── Query learnings ──────────────────────────────────────────────────────
-  // RISE: Prioritize patterns with successful improvement trajectories
+  // RISE: Sort by improvement trajectory success rate
 
   findRelevantLearnings(tool?: string, errorPattern?: string): LearningEntry[] {
     const relevant = this.learnings.filter(l => {
@@ -821,33 +1487,10 @@ class LearningEngine {
       if (errorPattern && l.error && !l.error.includes(errorPattern)) return false;
       return l.type === "pattern" || l.type === "insight";
     });
-
-    // RISE: Sort by improvement trajectory success rate
+    // Sort by RISE effectiveness score
     return relevant
-      .sort((a, b) => {
-        const aScore = this.calculatePatternScore(a);
-        const bScore = this.calculatePatternScore(b);
-        return bScore - aScore;
-      })
+      .sort((a, b) => this.calculatePatternScore(b) - this.calculatePatternScore(a))
       .slice(0, 10);
-  }
-
-  // RISE: Calculate pattern effectiveness score
-  private calculatePatternScore(entry: LearningEntry): number {
-    let score = entry.useCount || 0;
-
-    // Boost patterns with successful improvement trajectory
-    if (entry.improvementTrajectory && entry.improvementTrajectory.length > 0) {
-      const avgSuccess = entry.improvementTrajectory.reduce((a, b) => a + b, 0) / entry.improvementTrajectory.length;
-      score += avgSuccess * 5;
-    }
-
-    // Boost crystallized patterns (proven valuable enough to become code)
-    if (entry.crystallizedTo) {
-      score += 10;
-    }
-
-    return score;
   }
 
   getRecentFailures(limit = 5): LearningEntry[] {
@@ -867,77 +1510,12 @@ class LearningEngine {
   getLearningsSummary(): string {
     const failures = this.learnings.filter(l => l.type === "failure").length;
     const patterns = this.learnings.filter(l => l.type === "pattern").length;
+    const crystallized = this.learnings.filter(l => l.crystallizedTo).length;
     const insights = this.learnings.filter(l => l.type === "insight").length;
     const successes = this.learnings.filter(l => l.type === "success").length;
-    const crystallized = this.learnings.filter(l => l.crystallizedTo).length;
-    const pendingCrystallization = this.getCrystallizationCandidates().length;
+    const pending = this.getCrystallizationCandidates().length;
 
-    return `${patterns} patterns (${crystallized} crystallized, ${pendingCrystallization} pending), ${insights} insights, ${failures} unresolved failures, ${successes} successes`;
-  }
-
-  // Self-Improving Coding Agent: Overseer mechanism (arXiv:2504.15228)
-  // Periodically reviews patterns and identifies improvements
-  runOverseer(): OverseerReport {
-    const report: OverseerReport = {
-      timestamp: new Date().toISOString(),
-      crystallizationCandidates: [],
-      stalePatterns: [],
-      recurringFailures: [],
-      recommendations: [],
-    };
-
-    // 1. Find patterns ready for crystallization
-    report.crystallizationCandidates = this.getCrystallizationCandidates().map(p => ({
-      id: p.id,
-      tool: p.tool || "unknown",
-      error: p.error?.slice(0, 50) || "",
-      useCount: p.useCount,
-    }));
-
-    // 2. Find stale patterns (not used in 30 days)
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    report.stalePatterns = this.learnings
-      .filter(l => l.type === "pattern" && new Date(l.timestamp).getTime() < thirtyDaysAgo && l.useCount < 2)
-      .map(p => p.id);
-
-    // 3. Find recurring failures (same error 3+ times without resolution)
-    const failureCounts = new Map<string, number>();
-    for (const l of this.learnings.filter(l => l.type === "failure" && !l.resolution)) {
-      const sig = `${l.tool}:${this.extractErrorSignature(l.error || "")}`;
-      failureCounts.set(sig, (failureCounts.get(sig) || 0) + 1);
-    }
-    report.recurringFailures = Array.from(failureCounts.entries())
-      .filter(([_, count]) => count >= 3)
-      .map(([sig, count]) => ({ signature: sig, count }));
-
-    // 4. Generate recommendations
-    if (report.crystallizationCandidates.length > 0) {
-      report.recommendations.push(
-        `${report.crystallizationCandidates.length} patterns ready to crystallize into hooks/tools`
-      );
-    }
-    if (report.recurringFailures.length > 0) {
-      report.recommendations.push(
-        `${report.recurringFailures.length} recurring failures need attention`
-      );
-    }
-    if (report.stalePatterns.length > 5) {
-      report.recommendations.push(
-        `Consider pruning ${report.stalePatterns.length} stale patterns`
-      );
-    }
-
-    return report;
-  }
-
-  // Increment use count when pattern is applied
-  recordPatternUse(patternId: string): void {
-    const entry = this.learnings.find(l => l.id === patternId);
-    if (entry) {
-      entry.useCount = (entry.useCount || 0) + 1;
-      this.saveLearnings();
-      this.checkCrystallization(entry);
-    }
+    return `${patterns} patterns (${crystallized} crystallized, ${pending} pending), ${insights} insights, ${failures} unresolved, ${successes} successes`;
   }
 
   // ── Pending session management ───────────────────────────────────────────
@@ -966,6 +1544,423 @@ class LearningEngine {
 
   hasPendingSession(): boolean {
     return this.pendingSession !== null;
+  }
+
+  // ── Outcome-based Learning ────────────────────────────────────────────────
+  // Track real-world feedback signals (e.g., TikTok views, tweet engagement)
+
+  private loadOutcomes(): void {
+    try {
+      if (existsSync(this.outcomesPath)) {
+        this.outcomes = JSON.parse(readFileSync(this.outcomesPath, "utf-8"));
+      }
+      if (existsSync(this.insightsPath)) {
+        const insights = JSON.parse(readFileSync(this.insightsPath, "utf-8"));
+        this.taskTypeInsights = new Map(Object.entries(insights));
+      }
+    } catch (err) {
+      this.logger?.warn?.(`[foundry] Failed to load outcomes: ${err}`);
+    }
+  }
+
+  private saveOutcomes(): void {
+    writeFileSync(this.outcomesPath, JSON.stringify(this.outcomes, null, 2));
+    writeFileSync(
+      this.insightsPath,
+      JSON.stringify(Object.fromEntries(this.taskTypeInsights), null, 2)
+    );
+  }
+
+  // Register a task for outcome tracking
+  trackOutcome(
+    taskType: string,
+    taskDescription: string,
+    taskParams: Record<string, any>,
+    successThreshold?: Record<string, number>
+  ): string {
+    const outcome: TaskOutcome = {
+      id: `outcome_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      taskType,
+      taskDescription,
+      taskParams,
+      executedAt: new Date().toISOString(),
+      metrics: {},
+      insights: [],
+      successThreshold,
+    };
+    this.outcomes.push(outcome);
+    this.saveOutcomes();
+    this.logger?.info(`[foundry] Tracking outcome: ${taskType} - ${outcome.id}`);
+    return outcome.id;
+  }
+
+  // Record feedback for a tracked outcome
+  recordFeedback(
+    outcomeId: string,
+    metrics: Record<string, number>,
+    feedbackSource: string
+  ): TaskOutcome | null {
+    const outcome = this.outcomes.find(o => o.id === outcomeId);
+    if (!outcome) {
+      this.logger?.warn?.(`[foundry] Outcome not found: ${outcomeId}`);
+      return null;
+    }
+
+    outcome.metrics = { ...outcome.metrics, ...metrics };
+    outcome.feedbackCollectedAt = new Date().toISOString();
+    outcome.feedbackSource = feedbackSource;
+
+    // Determine success based on threshold
+    if (outcome.successThreshold) {
+      outcome.success = Object.entries(outcome.successThreshold).every(
+        ([key, threshold]) => (outcome.metrics[key] || 0) >= threshold
+      );
+    }
+
+    this.saveOutcomes();
+    this.logger?.info(
+      `[foundry] Recorded feedback for ${outcomeId}: ${JSON.stringify(metrics)} (success: ${outcome.success})`
+    );
+
+    // Trigger insight regeneration for this task type
+    this.regenerateInsights(outcome.taskType);
+
+    return outcome;
+  }
+
+  // Get outcomes pending feedback collection
+  getPendingFeedback(taskType?: string): TaskOutcome[] {
+    return this.outcomes.filter(o => {
+      if (o.feedbackCollectedAt) return false; // Already collected
+      if (taskType && o.taskType !== taskType) return false;
+      // Only collect feedback after some time has passed (e.g., 1 hour)
+      const executedAt = new Date(o.executedAt).getTime();
+      const hourAgo = Date.now() - 60 * 60 * 1000;
+      return executedAt < hourAgo;
+    });
+  }
+
+  // Regenerate insights for a task type based on all outcomes
+  regenerateInsights(taskType: string): TaskTypeInsights {
+    const typeOutcomes = this.outcomes.filter(
+      o => o.taskType === taskType && o.feedbackCollectedAt
+    );
+
+    if (typeOutcomes.length === 0) {
+      const empty: TaskTypeInsights = {
+        taskType,
+        totalTasks: 0,
+        successfulTasks: 0,
+        avgMetrics: {},
+        topPerformers: [],
+        patterns: { successful: [], unsuccessful: [] },
+        recommendations: [],
+        lastUpdated: new Date().toISOString(),
+      };
+      this.taskTypeInsights.set(taskType, empty);
+      return empty;
+    }
+
+    // Calculate averages
+    const avgMetrics: Record<string, number> = {};
+    const metricSums: Record<string, { sum: number; count: number }> = {};
+
+    for (const outcome of typeOutcomes) {
+      for (const [key, value] of Object.entries(outcome.metrics)) {
+        if (!metricSums[key]) metricSums[key] = { sum: 0, count: 0 };
+        metricSums[key].sum += value;
+        metricSums[key].count += 1;
+      }
+    }
+
+    for (const [key, { sum, count }] of Object.entries(metricSums)) {
+      avgMetrics[key] = Math.round(sum / count);
+    }
+
+    // Find top performers (by first metric or 'views' or 'engagement')
+    const primaryMetric = Object.keys(avgMetrics)[0] || "views";
+    const sorted = [...typeOutcomes].sort(
+      (a, b) => (b.metrics[primaryMetric] || 0) - (a.metrics[primaryMetric] || 0)
+    );
+    const topPerformers = sorted.slice(0, 3);
+
+    // Extract patterns from successful vs unsuccessful
+    const successful = typeOutcomes.filter(o => o.success === true);
+    const unsuccessful = typeOutcomes.filter(o => o.success === false);
+
+    const successfulPatterns = this.extractPatterns(successful);
+    const unsuccessfulPatterns = this.extractPatterns(unsuccessful);
+
+    // Generate recommendations
+    const recommendations: string[] = [];
+
+    if (topPerformers.length > 0) {
+      const topParams = topPerformers[0].taskParams;
+      if (topParams.time || topParams.postTime) {
+        recommendations.push(
+          `Best performing time: ${topParams.time || topParams.postTime}`
+        );
+      }
+      if (topParams.hashtags) {
+        recommendations.push(`Top hashtags: ${topParams.hashtags}`);
+      }
+      if (topParams.contentType) {
+        recommendations.push(`Best content type: ${topParams.contentType}`);
+      }
+      if (topParams.length || topParams.duration) {
+        recommendations.push(
+          `Optimal length: ${topParams.length || topParams.duration}`
+        );
+      }
+    }
+
+    if (successfulPatterns.length > 0) {
+      recommendations.push(`Successful pattern: ${successfulPatterns[0]}`);
+    }
+    if (unsuccessfulPatterns.length > 0) {
+      recommendations.push(`Avoid: ${unsuccessfulPatterns[0]}`);
+    }
+
+    const insights: TaskTypeInsights = {
+      taskType,
+      totalTasks: typeOutcomes.length,
+      successfulTasks: successful.length,
+      avgMetrics,
+      topPerformers,
+      patterns: {
+        successful: successfulPatterns,
+        unsuccessful: unsuccessfulPatterns,
+      },
+      recommendations,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    // Generate improvement suggestion if patterns are strong enough
+    const MIN_SAMPLES_FOR_IMPROVEMENT = 5;
+    const MIN_SUCCESS_RATE_FOR_CONFIDENCE = 0.6;
+
+    if (typeOutcomes.length >= MIN_SAMPLES_FOR_IMPROVEMENT) {
+      const successRate = successful.length / typeOutcomes.length;
+      const confidence = Math.min(
+        successRate * (typeOutcomes.length / 10), // More samples = higher confidence
+        1.0
+      );
+
+      if (confidence >= 0.5 && successfulPatterns.length > 0) {
+        // Generate suggested changes based on successful patterns
+        const suggestedChanges: string[] = [];
+
+        // Parse patterns into actionable changes
+        for (const pattern of successfulPatterns.slice(0, 3)) {
+          const match = pattern.match(/^(\w+):\s*(.+?)\s*\(/);
+          if (match) {
+            const [, param, value] = match;
+            suggestedChanges.push(`Set default ${param} to "${value}"`);
+          }
+        }
+
+        // Add recommendations as changes
+        for (const rec of recommendations.slice(0, 2)) {
+          if (rec.includes(":")) {
+            suggestedChanges.push(rec);
+          }
+        }
+
+        if (suggestedChanges.length > 0) {
+          // Try to infer target skill from task type
+          const targetSkill = this.inferSkillFromTaskType(taskType);
+
+          insights.improvementSuggestion = {
+            confidence,
+            targetSkill,
+            suggestedChanges,
+          };
+
+          this.logger?.info(
+            `[foundry] Generated improvement suggestion for ${taskType} (confidence: ${(confidence * 100).toFixed(0)}%): ${suggestedChanges.length} changes`
+          );
+        }
+      }
+    }
+
+    this.taskTypeInsights.set(taskType, insights);
+    this.saveOutcomes();
+    this.logger?.info(
+      `[foundry] Regenerated insights for ${taskType}: ${insights.recommendations.length} recommendations`
+    );
+
+    return insights;
+  }
+
+  // Extract common patterns from a set of outcomes
+  private extractPatterns(outcomes: TaskOutcome[]): string[] {
+    if (outcomes.length < 2) return [];
+
+    const patterns: string[] = [];
+    const paramCounts: Record<string, Record<string, number>> = {};
+
+    // Count occurrences of each param value
+    for (const outcome of outcomes) {
+      for (const [key, value] of Object.entries(outcome.taskParams)) {
+        if (!paramCounts[key]) paramCounts[key] = {};
+        const strValue = typeof value === "string" ? value : JSON.stringify(value);
+        paramCounts[key][strValue] = (paramCounts[key][strValue] || 0) + 1;
+      }
+    }
+
+    // Find params that appear in >50% of outcomes
+    const threshold = outcomes.length * 0.5;
+    for (const [param, valueCounts] of Object.entries(paramCounts)) {
+      for (const [value, count] of Object.entries(valueCounts)) {
+        if (count >= threshold) {
+          patterns.push(`${param}: ${value} (${Math.round((count / outcomes.length) * 100)}%)`);
+        }
+      }
+    }
+
+    return patterns.slice(0, 5); // Limit to top 5 patterns
+  }
+
+  // Get insights for a task type
+  getTaskInsights(taskType: string): TaskTypeInsights | null {
+    return this.taskTypeInsights.get(taskType) || null;
+  }
+
+  // Get all task types with insights
+  getAllTaskTypes(): string[] {
+    return Array.from(this.taskTypeInsights.keys());
+  }
+
+  // Get insights formatted for injection into agent context
+  getInsightsForContext(taskType: string): string {
+    const insights = this.taskTypeInsights.get(taskType);
+    if (!insights || insights.totalTasks === 0) {
+      return "";
+    }
+
+    let context = `\n## 📊 Learned Insights: ${taskType}\n\n`;
+    context += `Based on ${insights.totalTasks} tracked outcomes (${insights.successfulTasks} successful):\n\n`;
+
+    if (insights.avgMetrics && Object.keys(insights.avgMetrics).length > 0) {
+      context += `**Average metrics**: ${Object.entries(insights.avgMetrics)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(", ")}\n\n`;
+    }
+
+    if (insights.recommendations.length > 0) {
+      context += `**Recommendations**:\n`;
+      for (const rec of insights.recommendations) {
+        context += `- ${rec}\n`;
+      }
+      context += "\n";
+    }
+
+    if (insights.patterns.successful.length > 0) {
+      context += `**What works**: ${insights.patterns.successful.slice(0, 3).join("; ")}\n`;
+    }
+
+    if (insights.patterns.unsuccessful.length > 0) {
+      context += `**What to avoid**: ${insights.patterns.unsuccessful.slice(0, 2).join("; ")}\n`;
+    }
+
+    return context;
+  }
+
+  // Start periodic feedback collection
+  startFeedbackCollection(
+    collectFn: (outcome: TaskOutcome) => Promise<Record<string, number> | null>,
+    intervalMs = 60 * 60 * 1000 // default: 1 hour
+  ): void {
+    if (this.feedbackCollectionInterval) return;
+
+    this.feedbackCollectionInterval = setInterval(async () => {
+      const pending = this.getPendingFeedback();
+      this.logger?.info(`[foundry] Checking feedback for ${pending.length} pending outcomes`);
+
+      for (const outcome of pending) {
+        try {
+          const metrics = await collectFn(outcome);
+          if (metrics) {
+            this.recordFeedback(outcome.id, metrics, "auto_collection");
+          }
+        } catch (err) {
+          this.logger?.warn?.(`[foundry] Failed to collect feedback for ${outcome.id}: ${err}`);
+        }
+      }
+    }, intervalMs);
+
+    this.logger?.info(`[foundry] Feedback collection started (interval: ${intervalMs}ms)`);
+  }
+
+  stopFeedbackCollection(): void {
+    if (this.feedbackCollectionInterval) {
+      clearInterval(this.feedbackCollectionInterval);
+      this.feedbackCollectionInterval = null;
+    }
+  }
+
+  // Get all outcomes for a task type
+  getOutcomes(taskType?: string): TaskOutcome[] {
+    if (taskType) {
+      return this.outcomes.filter(o => o.taskType === taskType);
+    }
+    return this.outcomes;
+  }
+
+  // Infer which skill should be modified based on task type
+  private inferSkillFromTaskType(taskType: string): string | undefined {
+    // Common mappings from task type to skill name
+    const mappings: Record<string, string> = {
+      tiktok_post: "tiktok",
+      tiktok_video: "tiktok",
+      tweet: "twitter",
+      twitter_post: "twitter",
+      linkedin_post: "linkedin",
+      instagram_post: "instagram",
+      email_campaign: "email",
+      blog_post: "blog",
+      youtube_video: "youtube",
+    };
+
+    const normalized = taskType.toLowerCase().replace(/[^a-z_]/g, "");
+    return mappings[normalized];
+  }
+
+  // Get improvement suggestions that should be surfaced to the agent
+  getImprovementSuggestions(): Array<{
+    taskType: string;
+    suggestion: NonNullable<TaskTypeInsights["improvementSuggestion"]>;
+  }> {
+    const suggestions: Array<{
+      taskType: string;
+      suggestion: NonNullable<TaskTypeInsights["improvementSuggestion"]>;
+    }> = [];
+
+    for (const [taskType, insights] of this.taskTypeInsights) {
+      if (
+        insights.improvementSuggestion &&
+        insights.improvementSuggestion.confidence >= 0.5 &&
+        !insights.improvementSuggestion.appliedAt
+      ) {
+        suggestions.push({
+          taskType,
+          suggestion: insights.improvementSuggestion,
+        });
+      }
+    }
+
+    return suggestions.sort((a, b) => b.suggestion.confidence - a.suggestion.confidence);
+  }
+
+  // Mark an improvement as applied
+  markImprovementApplied(taskType: string): void {
+    const insights = this.taskTypeInsights.get(taskType);
+    if (insights?.improvementSuggestion) {
+      insights.improvementSuggestion.appliedAt = new Date().toISOString();
+      this.taskTypeInsights.set(taskType, insights);
+      this.saveOutcomes();
+      this.logger?.info(`[foundry] Marked improvement applied for ${taskType}`);
+    }
   }
 }
 
@@ -1105,7 +2100,7 @@ class CodeValidator {
       const runnerCode = `
 import { pathToFileURL } from "url";
 
-// Mock clawdbot API
+// Mock OpenClaw API
 const mockApi = {
   logger: { info: () => {}, warn: () => {}, error: () => {} },
   pluginConfig: {},
@@ -1228,19 +2223,21 @@ export default {
   register(api: ClawdbotPluginApi) {
     const logger = api.logger;
     const cfg = api.pluginConfig || {};
-    const dataDir = (cfg as any).dataDir || join(homedir(), ".clawdbot", "foundry");
-    const clawdbotPath = (cfg as any).clawdbotPath || "/Users/lekt9/Projects/aiko/clawdbot";
+    const dataDir = (cfg as any).dataDir || join(homedir(), ".openclaw", "foundry");
+    const openclawPath = (cfg as any).openclawPath || "/Users/lekt9/Projects/aiko/openclaw";
 
     if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
-    const writer = new CodeWriter(dataDir, clawdbotPath, logger);
-    const selfWriter = new SelfWriter({ dataDir, logger });
+    const writer = new CodeWriter(dataDir, openclawPath, logger);
     const docsFetcher = new DocsFetcher();
     const learningEngine = new LearningEngine(dataDir, logger);
     const codeValidator = new CodeValidator(logger);
 
     // Track current failure for resolution matching
     let lastFailureId: string | null = null;
+    // RISE: Track pattern used for injection (to detect successful retries)
+    let lastInjectedPatternId: string | null = null;
+    let lastInjectedForTool: string | null = null;
 
     // ── Tools ───────────────────────────────────────────────────────────────
 
@@ -1252,7 +2249,7 @@ export default {
         label: "Research Documentation",
         description:
           "Search docs.molt.bot for best practices. Use this before implementing to understand " +
-          "the clawdbot API, patterns, and conventions.",
+          "the OpenClaw API, patterns, and conventions.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -1423,7 +2420,7 @@ export default {
       {
         name: "foundry_write_extension",
         label: "Write Extension",
-        description: "Write a new clawdbot extension to ~/.clawdbot/extensions/. Restart gateway to load.",
+        description: "Write a new OpenClaw extension to ~/.openclaw/extensions/. Restart gateway to load.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -1498,37 +2495,103 @@ export default {
               output += `\n**Security flags (review recommended):**\n${validation.securityFlags.map(f => `- ${f}`).join("\n")}\n`;
             }
 
-            output += `\n**Run \`clawdbot gateway restart\` to load.**`;
+            output += `\n**Run \`openclaw gateway restart\` to load.**`;
 
             return { content: [{ type: "text", text: output }] };
           } catch (err: any) {
-            return {
-              content: [{
-                type: "text",
-                text: `## Extension BLOCKED\n\n` +
-                  `**${p.name}** failed validation:\n\n` +
-                  `${err.message}\n\n` +
-                  `Fix the code and try again.`,
-              }],
-            };
+            // SelfEvolve (arXiv:2306.02907): Return structured feedback for LLM refinement
+            const errorMsg = err.message || String(err);
+            const isSandboxError = errorMsg.includes("Sandbox");
+            const isValidationError = errorMsg.includes("validation");
+
+            // Record the failure for learning
+            learningEngine.recordFailure(
+              "foundry_write_extension",
+              errorMsg,
+              `Extension: ${p.id}, Tools: ${tools.length}, Hooks: ${hooks.length}`,
+              isSandboxError ? "sandbox_runtime_error" : "validation_error"
+            );
+
+            // Build detailed feedback for the LLM to self-correct
+            let feedback = `## Extension FAILED - SelfEvolve Feedback\n\n`;
+            feedback += `**Extension**: ${p.name} (\`${p.id}\`)\n\n`;
+            feedback += `### Error Type\n`;
+            feedback += isSandboxError
+              ? `**Runtime Error** - The code compiled but failed during execution.\n`
+              : `**Validation Error** - The code failed static analysis.\n`;
+            feedback += `\n### Error Details\n\`\`\`\n${errorMsg}\n\`\`\`\n\n`;
+
+            // Provide specific guidance based on error type
+            feedback += `### How to Fix\n`;
+            if (isSandboxError) {
+              feedback += `1. Check for undefined variables or missing imports\n`;
+              feedback += `2. Ensure all async functions are properly awaited\n`;
+              feedback += `3. Verify the code handles edge cases (null, undefined, empty)\n`;
+              feedback += `4. Check that external dependencies are available\n`;
+            } else if (isValidationError) {
+              feedback += `1. Review the validation rules in the error message\n`;
+              feedback += `2. Remove any blocked patterns (dangerous code, etc.)\n`;
+              feedback += `3. Ensure proper types and structure\n`;
+            }
+
+            feedback += `\n### Retry Instructions\n`;
+            feedback += `Fix the issues above and call \`foundry_write_extension\` again with corrected code.\n`;
+            feedback += `The code should be self-contained and not rely on external state.\n`;
+
+            return { content: [{ type: "text", text: feedback }] };
           }
         },
       },
 
-      // ── foundry_write_skill ───────────────────────────────────────────────
+      // ── foundry_write_skill (OpenClaw/AgentSkills-compatible) ───────────────
       {
         name: "foundry_write_skill",
         label: "Write Skill",
-        description: "Write a skill package (SKILL.md + api.ts) to ~/.clawdbot/skills/",
+        description: "Write an OpenClaw/AgentSkills-compatible skill (SKILL.md) to ~/.openclaw/skills/. Supports both general skills and API-based skills.",
         parameters: {
           type: "object" as const,
           properties: {
-            name: { type: "string" as const, description: "Skill name" },
-            description: { type: "string" as const, description: "What this skill does" },
-            baseUrl: { type: "string" as const, description: "API base URL" },
+            name: { type: "string" as const, description: "Skill name (kebab-case recommended, e.g., 'my-skill')" },
+            description: { type: "string" as const, description: "What this skill does (appears in frontmatter)" },
+            content: { type: "string" as const, description: "Markdown content for the skill (after frontmatter)" },
+            // OpenClaw frontmatter options
+            homepage: { type: "string" as const, description: "URL for skill documentation/website" },
+            userInvocable: { type: "boolean" as const, description: "Whether skill is exposed as user slash command (default: true)" },
+            disableModelInvocation: { type: "boolean" as const, description: "Exclude from model prompt (default: false)" },
+            commandDispatch: { type: "string" as const, enum: ["tool"], description: "Bypass model and dispatch directly to tool" },
+            commandTool: { type: "string" as const, description: "Tool name when command-dispatch is 'tool'" },
+            commandArgMode: { type: "string" as const, enum: ["raw"], description: "How to forward args to tool" },
+            metadata: {
+              type: "object" as const,
+              description: "OpenClaw metadata for gating (requires.bins, requires.env, etc.)",
+              properties: {
+                openclaw: {
+                  type: "object" as const,
+                  properties: {
+                    always: { type: "boolean" as const, description: "Always include skill (skip gates)" },
+                    emoji: { type: "string" as const, description: "Emoji for macOS Skills UI" },
+                    homepage: { type: "string" as const, description: "URL for macOS Skills UI" },
+                    os: { type: "array" as const, items: { type: "string" as const, enum: ["darwin", "linux", "win32"] } },
+                    primaryEnv: { type: "string" as const, description: "Env var for apiKey mapping" },
+                    skillKey: { type: "string" as const, description: "Config key override" },
+                    requires: {
+                      type: "object" as const,
+                      properties: {
+                        bins: { type: "array" as const, items: { type: "string" as const }, description: "Required binaries on PATH" },
+                        anyBins: { type: "array" as const, items: { type: "string" as const }, description: "At least one required" },
+                        env: { type: "array" as const, items: { type: "string" as const }, description: "Required env vars" },
+                        config: { type: "array" as const, items: { type: "string" as const }, description: "Required config paths" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            // Legacy API-based skill support
+            baseUrl: { type: "string" as const, description: "(Legacy) API base URL for API-based skills" },
             endpoints: {
               type: "array" as const,
-              description: "API endpoints",
+              description: "(Legacy) API endpoints for API-based skills",
               items: {
                 type: "object" as const,
                 properties: {
@@ -1540,10 +2603,10 @@ export default {
             },
             authHeaders: {
               type: "object" as const,
-              description: "Auth headers to store (optional)",
+              description: "(Legacy) Auth headers for API-based skills",
             },
           },
-          required: ["name", "description", "baseUrl", "endpoints"],
+          required: ["name", "description"],
         },
         async execute(_toolCallId: string, params: unknown) {
           const p = params as any;
@@ -1551,23 +2614,163 @@ export default {
           const skillDir = writer.writeSkill({
             name: p.name,
             description: p.description,
+            content: p.content,
+            homepage: p.homepage,
+            userInvocable: p.userInvocable,
+            disableModelInvocation: p.disableModelInvocation,
+            commandDispatch: p.commandDispatch,
+            commandTool: p.commandTool,
+            commandArgMode: p.commandArgMode,
+            metadata: p.metadata,
             baseUrl: p.baseUrl,
-            endpoints: p.endpoints || [],
+            endpoints: p.endpoints,
             authHeaders: p.authHeaders,
           });
 
-          return {
-            content: [{
-              type: "text",
-              text: `## Skill Written\n\n` +
-                `**${p.name}**\n\n` +
-                `- Location: \`${skillDir}\`\n` +
-                `- Base URL: \`${p.baseUrl}\`\n` +
-                `- Endpoints: ${(p.endpoints || []).length}\n` +
-                `- Auth: ${p.authHeaders ? "stored" : "none"}\n\n` +
-                `Skill is ready to use with unbrowse_replay.`,
-            }],
-          };
+          const isApiSkill = p.baseUrl && p.endpoints?.length > 0;
+          let summary = `## Skill Written (OpenClaw-compatible)\n\n` +
+            `**${p.name}**\n\n` +
+            `- Location: \`${skillDir}\`\n` +
+            `- Format: AgentSkills/OpenClaw SKILL.md\n`;
+
+          if (isApiSkill) {
+            summary += `- Type: API-based skill\n` +
+              `- Base URL: \`${p.baseUrl}\`\n` +
+              `- Endpoints: ${p.endpoints.length}\n`;
+          } else {
+            summary += `- Type: General skill\n`;
+          }
+
+          if (p.metadata?.openclaw?.requires) {
+            const req = p.metadata.openclaw.requires;
+            if (req.bins?.length) summary += `- Required bins: ${req.bins.join(", ")}\n`;
+            if (req.env?.length) summary += `- Required env: ${req.env.join(", ")}\n`;
+            if (req.config?.length) summary += `- Required config: ${req.config.join(", ")}\n`;
+          }
+
+          summary += `\nSkill is ready. Restart gateway or start new session to load.`;
+
+          return { content: [{ type: "text", text: summary }] };
+        },
+      },
+
+      // ── foundry_write_browser_skill ─────────────────────────────────────────
+      {
+        name: "foundry_write_browser_skill",
+        label: "Write Browser Skill",
+        description: "Write a browser automation skill that uses the OpenClaw browser tool. Automatically gates on browser.enabled config.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            name: { type: "string" as const, description: "Skill name (kebab-case, e.g., 'twitter-poster')" },
+            description: { type: "string" as const, description: "What this skill automates" },
+            targetUrl: { type: "string" as const, description: "Primary URL this skill interacts with" },
+            actions: {
+              type: "array" as const,
+              description: "Documented browser actions",
+              items: {
+                type: "object" as const,
+                properties: {
+                  name: { type: "string" as const, description: "Action name (e.g., 'Post Tweet')" },
+                  description: { type: "string" as const, description: "What this action does" },
+                  steps: { type: "array" as const, items: { type: "string" as const }, description: "Step-by-step instructions" },
+                },
+              },
+            },
+            authMethod: {
+              type: "string" as const,
+              enum: ["manual", "cookie", "header", "oauth"],
+              description: "How authentication is handled",
+            },
+            authNotes: { type: "string" as const, description: "Additional auth instructions" },
+            content: { type: "string" as const, description: "Additional markdown content" },
+            metadata: {
+              type: "object" as const,
+              description: "Additional OpenClaw metadata",
+            },
+          },
+          required: ["name", "description"],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as any;
+
+          const skillDir = writer.writeBrowserSkill({
+            name: p.name,
+            description: p.description,
+            targetUrl: p.targetUrl,
+            actions: p.actions,
+            authMethod: p.authMethod,
+            authNotes: p.authNotes,
+            content: p.content,
+            metadata: p.metadata,
+          });
+
+          let summary = `## Browser Skill Written\n\n` +
+            `**${p.name}**\n\n` +
+            `- Location: \`${skillDir}\`\n` +
+            `- Type: Browser automation skill\n` +
+            `- Target: ${p.targetUrl || "Not specified"}\n` +
+            `- Auth: ${p.authMethod || "none"}\n` +
+            `- Gated on: \`browser.enabled\` config\n`;
+
+          if (p.actions?.length) {
+            summary += `- Actions: ${p.actions.map((a: any) => a.name).join(", ")}\n`;
+          }
+
+          summary += `\nSkill is ready. Enable browser in config and restart gateway to use.`;
+
+          return { content: [{ type: "text", text: summary }] };
+        },
+      },
+
+      // ── foundry_write_hook ──────────────────────────────────────────────────
+      {
+        name: "foundry_write_hook",
+        label: "Write Hook",
+        description: "Write a standalone OpenClaw hook (HOOK.md + handler.ts) to ~/.openclaw/hooks/. Hooks trigger on events like command:new, gateway:startup, etc.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            name: { type: "string" as const, description: "Hook name (kebab-case, e.g., 'welcome-message')" },
+            description: { type: "string" as const, description: "What this hook does" },
+            events: {
+              type: "array" as const,
+              items: {
+                type: "string" as const,
+                enum: ["command:new", "command:reset", "command:stop", "agent:bootstrap", "gateway:startup", "tool_result_persist"],
+              },
+              description: "Events that trigger this hook",
+            },
+            code: {
+              type: "string" as const,
+              description: "Handler code (TypeScript). Should define a `handler` const of type HookHandler.",
+            },
+            metadata: {
+              type: "object" as const,
+              description: "OpenClaw metadata (emoji, requires, etc.)",
+            },
+          },
+          required: ["name", "description", "events"],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as any;
+
+          const hookDir = writer.writeHook({
+            name: p.name,
+            description: p.description,
+            events: p.events,
+            code: p.code,
+            metadata: p.metadata,
+          });
+
+          const summary = `## Hook Written\n\n` +
+            `**${p.name}**\n\n` +
+            `- Location: \`${hookDir}\`\n` +
+            `- Events: ${p.events.join(", ")}\n` +
+            `- Files: HOOK.md, handler.ts\n\n` +
+            `Enable with: \`openclaw hooks enable ${p.name}\``;
+
+          return { content: [{ type: "text", text: summary }] };
         },
       },
 
@@ -1680,7 +2883,7 @@ export default {
             output += `- Created: ${ext.createdAt}\n\n`;
 
             if (p.showCode) {
-              const codePath = join(homedir(), ".clawdbot", "extensions", ext.id, "index.ts");
+              const codePath = join(homedir(), ".openclaw", "extensions", ext.id, "index.ts");
               if (existsSync(codePath)) {
                 output += "```typescript\n" + readFileSync(codePath, "utf-8").slice(0, 2000) + "\n```\n\n";
               }
@@ -1690,8 +2893,10 @@ export default {
           output += `### Skills (${skills.length})\n\n`;
           for (const skill of skills) {
             output += `**${skill.name}**\n`;
-            output += `- Base URL: \`${skill.baseUrl}\`\n`;
-            output += `- Endpoints: ${skill.endpoints.length}\n`;
+            if (skill.baseUrl) {
+              output += `- Base URL: \`${skill.baseUrl}\`\n`;
+              output += `- Endpoints: ${skill.endpoints?.length ?? 0}\n`;
+            }
             output += `- Created: ${skill.createdAt}\n\n`;
           }
 
@@ -1706,8 +2911,8 @@ export default {
       // ── foundry_docs ──────────────────────────────────────────────────────
       {
         name: "foundry_docs",
-        label: "Read Clawdbot Docs",
-        description: "Read clawdbot plugin/hooks documentation for writing extensions",
+        label: "Read OpenClaw Docs",
+        description: "Read OpenClaw plugin/hooks documentation for writing extensions",
         parameters: {
           type: "object" as const,
           properties: {
@@ -1724,10 +2929,10 @@ export default {
           const docs = writer.getDocs();
           const section = p.section || "both";
 
-          let output = `## Clawdbot Extension Docs\n\n`;
+          let output = `## OpenClaw Extension Docs\n\n`;
 
           if (!docs.plugin && !docs.hooks) {
-            return { content: [{ type: "text", text: "Could not load clawdbot docs. Check clawdbotPath config." }] };
+            return { content: [{ type: "text", text: "Could not load OpenClaw docs. Check openclawPath config." }] };
           }
 
           if (section === "plugin" || section === "both") {
@@ -1929,7 +3134,7 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
 
           // Schedule restart after returning
           setTimeout(() => {
-            exec("clawdbot gateway restart", (error: any) => {
+            exec("openclaw gateway restart", (error: any) => {
               if (error) {
                 logger.error?.(`[foundry] Restart failed: ${error.message}`);
               }
@@ -1996,141 +3201,6 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
           return { content: [{ type: "text", text: output }] };
         },
       },
-
-      // ── foundry_overseer ────────────────────────────────────────────────────
-      // Self-Improving Coding Agent: Overseer mechanism (arXiv:2504.15228)
-      {
-        name: "foundry_overseer",
-        label: "Run Overseer",
-        description:
-          "Run the overseer to analyze patterns, identify crystallization candidates, " +
-          "find recurring failures, and get recommendations for self-improvement. " +
-          "Based on Self-Improving Coding Agent (arXiv:2504.15228).",
-        parameters: {
-          type: "object" as const,
-          properties: {},
-          required: [] as string[],
-        },
-        async execute() {
-          const report = learningEngine.runOverseer();
-
-          let output = `## Foundry Overseer Report\n\n`;
-          output += `**Generated**: ${report.timestamp}\n\n`;
-
-          if (report.crystallizationCandidates.length > 0) {
-            output += `### Crystallization Candidates\n`;
-            output += `Patterns ready to be converted into executable hooks/tools:\n\n`;
-            for (const c of report.crystallizationCandidates) {
-              output += `- **${c.tool}**: "${c.error}..." (used ${c.useCount}x) → \`foundry_crystallize id="${c.id}"\`\n`;
-            }
-            output += `\n`;
-          }
-
-          if (report.recurringFailures.length > 0) {
-            output += `### Recurring Failures\n`;
-            output += `Errors occurring 3+ times without resolution:\n\n`;
-            for (const f of report.recurringFailures) {
-              output += `- ${f.signature} (${f.count}x)\n`;
-            }
-            output += `\n`;
-          }
-
-          if (report.stalePatterns.length > 0) {
-            output += `### Stale Patterns\n`;
-            output += `${report.stalePatterns.length} patterns not used in 30+ days\n\n`;
-          }
-
-          if (report.recommendations.length > 0) {
-            output += `### Recommendations\n`;
-            for (const r of report.recommendations) {
-              output += `- ${r}\n`;
-            }
-          } else {
-            output += `\n✓ No immediate actions needed\n`;
-          }
-
-          return { content: [{ type: "text", text: output }] };
-        },
-      },
-
-      // ── foundry_crystallize ─────────────────────────────────────────────────
-      // HexMachina: Artifact-centric learning (arXiv:2506.04651)
-      {
-        name: "foundry_crystallize",
-        label: "Crystallize Pattern",
-        description:
-          "Convert a learned pattern into executable code (hook or tool). " +
-          "This 'crystallizes' passive knowledge into active behavior that runs automatically. " +
-          "Based on HexMachina artifact-centric learning (arXiv:2506.04651).",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            patternId: {
-              type: "string" as const,
-              description: "ID of the pattern to crystallize (from foundry_overseer)",
-            },
-            artifactType: {
-              type: "string" as const,
-              enum: ["hook", "tool"],
-              description: "Type of artifact to create (default: hook)",
-            },
-          },
-          required: ["patternId"] as string[],
-        },
-        async execute(_toolCallId: string, params: unknown) {
-          const p = params as { patternId: string; artifactType?: string };
-          const pattern = learningEngine.getPatterns().find(l => l.id === p.patternId);
-
-          if (!pattern) {
-            return { content: [{ type: "text", text: `Pattern not found: ${p.patternId}` }] };
-          }
-
-          if (!pattern.resolution) {
-            return { content: [{ type: "text", text: `Pattern has no resolution to crystallize` }] };
-          }
-
-          if (pattern.crystallizedTo) {
-            return { content: [{ type: "text", text: `Pattern already crystallized to: ${pattern.crystallizedTo}` }] };
-          }
-
-          const artifactType = p.artifactType || "hook";
-          const artifactId = `crystallized_${pattern.tool}_${Date.now()}`;
-
-          // Generate hook handler code based on the pattern
-          const handlerCode = `
-    // Check if this is the tool that had the issue
-    if (event.toolName === "${pattern.tool}") {
-      // Apply learned resolution: ${pattern.resolution?.slice(0, 100)}
-      ctx.log?.info("[crystallized] Applying learned pattern for ${pattern.tool}");
-      // Original error: ${pattern.error?.slice(0, 100)}
-      // TODO: Implement specific resolution logic based on pattern
-    }
-`;
-
-          // Write the hook via SelfWriter
-          // SelfWriter.writeHook(name, event, description, handlerCode, source)
-          const written = selfWriter.writeHook(
-            artifactId,
-            "before_tool_call",
-            `Auto-crystallized handler for ${pattern.tool} errors: ${pattern.error?.slice(0, 50)}`,
-            handlerCode,
-            `crystallized from pattern ${pattern.id}`
-          );
-          learningEngine.markCrystallized(p.patternId, written.id);
-
-          let output = `## Pattern Crystallized\n\n`;
-          output += `**Pattern**: ${pattern.id}\n`;
-          output += `**Tool**: ${pattern.tool}\n`;
-          output += `**Error**: ${pattern.error?.slice(0, 100)}...\n`;
-          output += `**Resolution**: ${pattern.resolution}\n\n`;
-          output += `**Created**: ${artifactType} → ${written.id}\n\n`;
-          output += `The pattern is now executable code. Restart gateway to activate:\n`;
-          output += `\`clawdbot gateway restart\`\n`;
-
-          return { content: [{ type: "text", text: output }] };
-        },
-      },
-
       // ── foundry_publish_ability ─────────────────────────────────────────
       {
         name: "foundry_publish_ability",
@@ -2176,7 +3246,7 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
           };
 
           // Get creator wallet from config
-          const configPath = join(homedir(), ".clawdbot", "clawdbot.json");
+          const configPath = join(homedir(), ".openclaw", "openclaw.json");
           let creatorWallet: string | null = null;
           try {
             const config = JSON.parse(readFileSync(configPath, "utf-8"));
@@ -2311,7 +3381,7 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
           const p = params as { action: string; query?: string; type?: string; id?: string; limit?: number };
 
           // Get config for marketplace
-          const configPath = join(homedir(), ".clawdbot", "clawdbot.json");
+          const configPath = join(homedir(), ".openclaw", "openclaw.json");
           let skillIndexUrl = "https://skills.molt.bot";
           let solanaPrivateKey: string | undefined;
           try {
@@ -2474,6 +3544,743 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
           }
         },
       },
+
+      // ── foundry_overseer ────────────────────────────────────────────────────
+      // Self-Improving Coding Agent (arXiv:2504.15228): Autonomous overseer
+      {
+        name: "foundry_overseer",
+        label: "Run Overseer",
+        description:
+          "Run the autonomous overseer to analyze patterns, identify crystallization candidates, " +
+          "find recurring failures, and get self-improvement recommendations.",
+        parameters: {
+          type: "object" as const,
+          properties: {},
+          required: [] as string[],
+        },
+        async execute() {
+          const report = learningEngine.runOverseer(dataDir);
+          const metrics = learningEngine.getAllToolMetrics();
+
+          let output = `## Foundry Overseer Report\n\n`;
+          output += `**Generated**: ${report.timestamp}\n`;
+          output += `**Patterns analyzed**: ${report.patternsAnalyzed}\n\n`;
+
+          // Tool fitness (ADAS)
+          if (metrics.length > 0) {
+            output += `### Tool Fitness (ADAS)\n`;
+            const sorted = metrics.sort((a, b) => b.fitness - a.fitness);
+            for (const m of sorted.slice(0, 10)) {
+              const bar = "█".repeat(Math.floor(m.fitness * 10)) + "░".repeat(10 - Math.floor(m.fitness * 10));
+              output += `- **${m.toolName}**: ${bar} ${(m.fitness * 100).toFixed(0)}% (${m.successCount}/${m.successCount + m.failureCount})\n`;
+            }
+            output += `\n`;
+          }
+
+          // Crystallization candidates (HexMachina)
+          if (report.crystallizationCandidates.length > 0) {
+            output += `### Crystallization Candidates (HexMachina)\n`;
+            output += `Patterns ready to become executable hooks:\n\n`;
+            for (const c of report.crystallizationCandidates) {
+              output += `- **${c.tool}**: "${c.error?.slice(0, 50)}..." (used ${c.useCount}x)\n`;
+              output += `  → \`foundry_crystallize patternId="${c.id}"\`\n`;
+            }
+            output += `\n`;
+          }
+
+          // Recurring failures
+          if (report.recurringFailures.length > 0) {
+            output += `### Recurring Failures (Need Attention)\n`;
+            for (const f of report.recurringFailures) {
+              output += `- **${f.signature}**: ${f.count} occurrences\n`;
+            }
+            output += `\n`;
+          }
+
+          // Actions taken (autonomous behavior)
+          if (report.actionsExecuted.length > 0) {
+            output += `### Actions Executed\n`;
+            for (const action of report.actionsExecuted) {
+              output += `- ${action}\n`;
+            }
+            output += `\n`;
+          }
+
+          if (report.crystallizationCandidates.length === 0 && report.recurringFailures.length === 0 && report.actionsExecuted.length === 0) {
+            output += `No immediate actions needed.\n`;
+          }
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_crystallize ─────────────────────────────────────────────────
+      // HexMachina (arXiv:2506.04651): LLM-driven crystallization
+      // Returns pattern context and asks LLM to generate hook code
+      {
+        name: "foundry_crystallize",
+        label: "Crystallize Pattern",
+        description:
+          "Start crystallization of a learned pattern. Returns pattern details and instructions " +
+          "for generating hook code. After reviewing, call foundry_save_hook with the generated code.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            patternId: {
+              type: "string" as const,
+              description: "ID of the pattern to crystallize (from foundry_overseer)",
+            },
+          },
+          required: ["patternId"] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { patternId: string };
+          const pattern = learningEngine.getPatterns().find(l => l.id === p.patternId);
+
+          if (!pattern) {
+            return { content: [{ type: "text", text: `Pattern not found: ${p.patternId}` }] };
+          }
+          if (!pattern.resolution) {
+            return { content: [{ type: "text", text: `Pattern has no resolution to crystallize` }] };
+          }
+          if (pattern.crystallizedTo) {
+            return { content: [{ type: "text", text: `Already crystallized to: ${pattern.crystallizedTo}` }] };
+          }
+
+          // HexMachina: Return context for LLM to generate the hook
+          let output = `## Crystallize Pattern: ${pattern.id}\n\n`;
+          output += `### Pattern Details\n`;
+          output += `- **Tool**: \`${pattern.tool}\`\n`;
+          output += `- **Error Pattern**: ${pattern.error}\n`;
+          output += `- **Learned Resolution**: ${pattern.resolution}\n`;
+          output += `- **Context**: ${pattern.context || "N/A"}\n`;
+          output += `- **Use Count**: ${pattern.useCount}\n`;
+          output += `- **Success Trajectory**: ${(pattern.improvementTrajectory || []).join(", ") || "N/A"}\n\n`;
+
+          output += `### Generate Hook Code\n\n`;
+          output += `Create a \`before_tool_call\` hook that:\n`;
+          output += `1. Triggers when \`${pattern.tool}\` is about to be called\n`;
+          output += `2. Detects conditions that would lead to: "${pattern.error?.slice(0, 100)}"\n`;
+          output += `3. Applies the resolution proactively: "${pattern.resolution}"\n`;
+          output += `4. Uses \`ctx.injectSystemMessage()\` to guide the LLM\n\n`;
+
+          output += `### Hook Template\n`;
+          output += `\`\`\`typescript\n`;
+          output += `api.on("before_tool_call", async (event, ctx) => {\n`;
+          output += `  if (event.toolName === "${pattern.tool}") {\n`;
+          output += `    // TODO: Add detection logic for the error condition\n`;
+          output += `    // TODO: Apply resolution proactively\n`;
+          output += `    if (ctx?.injectSystemMessage) {\n`;
+          output += `      ctx.injectSystemMessage(\`[CRYSTALLIZED] Apply: ${pattern.resolution?.slice(0, 100)}\`);\n`;
+          output += `    }\n`;
+          output += `  }\n`;
+          output += `});\n`;
+          output += `\`\`\`\n\n`;
+
+          output += `### Next Step\n`;
+          output += `Generate the complete hook code based on the pattern above, then call:\n`;
+          output += `\`\`\`\n`;
+          output += `foundry_save_hook(\n`;
+          output += `  patternId: "${pattern.id}",\n`;
+          output += `  hookCode: "<your generated code>"\n`;
+          output += `)\n`;
+          output += `\`\`\`\n`;
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_save_hook ──────────────────────────────────────────────────
+      // HexMachina: Save LLM-generated hook code
+      {
+        name: "foundry_save_hook",
+        label: "Save Crystallized Hook",
+        description:
+          "Save the LLM-generated hook code from crystallization. " +
+          "Call this after foundry_crystallize with the generated code.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            patternId: {
+              type: "string" as const,
+              description: "ID of the pattern being crystallized",
+            },
+            hookCode: {
+              type: "string" as const,
+              description: "The generated hook code (TypeScript)",
+            },
+            hookName: {
+              type: "string" as const,
+              description: "Optional name for the hook (defaults to pattern-based name)",
+            },
+          },
+          required: ["patternId", "hookCode"] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { patternId: string; hookCode: string; hookName?: string };
+          const pattern = learningEngine.getPatterns().find(l => l.id === p.patternId);
+
+          if (!pattern) {
+            return { content: [{ type: "text", text: `Pattern not found: ${p.patternId}` }] };
+          }
+          if (pattern.crystallizedTo) {
+            return { content: [{ type: "text", text: `Already crystallized to: ${pattern.crystallizedTo}` }] };
+          }
+
+          // Validate the hook code has basic structure
+          if (!p.hookCode.includes("api.on") && !p.hookCode.includes("event") && !p.hookCode.includes("ctx")) {
+            return { content: [{ type: "text", text: `Invalid hook code - must include api.on(), event, and ctx` }] };
+          }
+
+          // Generate hook ID and save
+          const hookId = p.hookName || `crystallized_${pattern.tool}_${Date.now()}`;
+          const hooksDir = join(dataDir, "hooks");
+          if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true });
+
+          const hookPath = join(hooksDir, `${hookId}.ts`);
+          const fullCode = `// HexMachina crystallized from pattern: ${pattern.id}
+// Tool: ${pattern.tool}
+// Error: ${pattern.error?.slice(0, 100)}
+// Resolution: ${pattern.resolution?.slice(0, 100)}
+// Generated by LLM
+
+${p.hookCode}
+`;
+          writeFileSync(hookPath, fullCode);
+          learningEngine.markCrystallized(p.patternId, hookId);
+
+          let output = `## Hook Saved\n\n`;
+          output += `**Pattern**: ${pattern.id}\n`;
+          output += `**Hook ID**: ${hookId}\n`;
+          output += `**Path**: ${hookPath}\n\n`;
+          output += `The pattern is now executable code.\n`;
+          output += `Run \`foundry_restart\` to activate the hook.\n`;
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_metrics ─────────────────────────────────────────────────────
+      // ADAS (arXiv:2408.08435): View tool performance metrics
+      {
+        name: "foundry_metrics",
+        label: "Tool Metrics",
+        description: "View tool performance metrics and fitness scores for agent evolution.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            toolName: {
+              type: "string" as const,
+              description: "Specific tool to get metrics for (optional)",
+            },
+          },
+          required: [] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { toolName?: string };
+          const metrics = learningEngine.getAllToolMetrics();
+
+          if (p.toolName) {
+            const m = metrics.find(m => m.toolName === p.toolName);
+            if (!m) return { content: [{ type: "text", text: `No metrics for: ${p.toolName}` }] };
+
+            return { content: [{ type: "text", text: `
+## ${m.toolName} Metrics
+
+- **Fitness**: ${(m.fitness * 100).toFixed(1)}%
+- **Success**: ${m.successCount}
+- **Failure**: ${m.failureCount}
+- **Avg Latency**: ${m.successCount + m.failureCount > 0 ? (m.totalLatencyMs / (m.successCount + m.failureCount)).toFixed(0) : 0}ms
+` }] };
+          }
+
+          if (metrics.length === 0) {
+            return { content: [{ type: "text", text: "No tool metrics recorded yet." }] };
+          }
+
+          const sorted = metrics.sort((a, b) => b.fitness - a.fitness);
+          let output = `## Tool Performance Metrics (ADAS)\n\n`;
+          output += `| Tool | Fitness | Success | Failure | Avg Latency |\n`;
+          output += `|------|---------|---------|---------|-------------|\n`;
+
+          for (const m of sorted) {
+            const avgLatency = m.successCount + m.failureCount > 0
+              ? (m.totalLatencyMs / (m.successCount + m.failureCount)).toFixed(0)
+              : 0;
+            output += `| ${m.toolName} | ${(m.fitness * 100).toFixed(0)}% | ${m.successCount} | ${m.failureCount} | ${avgLatency}ms |\n`;
+          }
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_evolve ─────────────────────────────────────────────────────
+      // ADAS (arXiv:2408.08435): Evolve underperforming tools
+      {
+        name: "foundry_evolve",
+        label: "Evolve Tools",
+        description:
+          "Identify underperforming tools and generate improved versions using ADAS patterns. " +
+          "Returns analysis and improvement prompts for the LLM to generate better implementations.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            fitnessThreshold: {
+              type: "number" as const,
+              description: "Tools below this fitness (0-1) will be flagged for evolution. Default: 0.5",
+            },
+            toolName: {
+              type: "string" as const,
+              description: "Specific tool to evolve (optional)",
+            },
+          },
+          required: [] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { fitnessThreshold?: number; toolName?: string };
+          const threshold = p.fitnessThreshold ?? 0.5;
+          const metrics = learningEngine.getAllToolMetrics();
+
+          // Find underperforming tools
+          let underperforming = metrics.filter(m =>
+            m.fitness < threshold &&
+            (m.successCount + m.failureCount) >= 3 // Minimum samples
+          );
+
+          if (p.toolName) {
+            underperforming = underperforming.filter(m => m.toolName === p.toolName);
+          }
+
+          if (underperforming.length === 0) {
+            if (p.toolName) {
+              const m = metrics.find(m => m.toolName === p.toolName);
+              if (m) {
+                return { content: [{ type: "text", text: `Tool "${p.toolName}" has fitness ${(m.fitness * 100).toFixed(0)}% (above threshold ${(threshold * 100).toFixed(0)}%)` }] };
+              }
+              return { content: [{ type: "text", text: `No metrics for: ${p.toolName}` }] };
+            }
+            return { content: [{ type: "text", text: `No underperforming tools found (threshold: ${(threshold * 100).toFixed(0)}%)` }] };
+          }
+
+          // Get failure patterns for these tools
+          const patterns = learningEngine.getPatterns();
+          const failures = learningEngine.getAll().filter(l => l.type === "failure");
+
+          let output = `## ADAS Tool Evolution\n\n`;
+          output += `Found ${underperforming.length} tool(s) below ${(threshold * 100).toFixed(0)}% fitness.\n\n`;
+
+          for (const tool of underperforming) {
+            output += `### ${tool.toolName}\n\n`;
+            output += `**Current Performance:**\n`;
+            output += `- Fitness: ${(tool.fitness * 100).toFixed(0)}%\n`;
+            output += `- Success: ${tool.successCount} | Failure: ${tool.failureCount}\n`;
+            output += `- Avg Latency: ${tool.successCount + tool.failureCount > 0 ? (tool.totalLatencyMs / (tool.successCount + tool.failureCount)).toFixed(0) : 0}ms\n\n`;
+
+            // Find related failures
+            const toolFailures = failures.filter(f => f.tool === tool.toolName).slice(-5);
+            if (toolFailures.length > 0) {
+              output += `**Recent Failures:**\n`;
+              for (const f of toolFailures) {
+                output += `- ${f.error?.slice(0, 80)}...\n`;
+              }
+              output += `\n`;
+            }
+
+            // Find related patterns (resolutions)
+            const toolPatterns = patterns.filter(p => p.tool === tool.toolName);
+            if (toolPatterns.length > 0) {
+              output += `**Known Solutions:**\n`;
+              for (const p of toolPatterns) {
+                output += `- Error: ${p.error?.slice(0, 50)}... → Resolution: ${p.resolution?.slice(0, 80)}\n`;
+              }
+              output += `\n`;
+            }
+
+            output += `**Evolution Strategy:**\n`;
+            output += `Based on the failure patterns, consider:\n`;
+            output += `1. Adding pre-validation of inputs\n`;
+            output += `2. Adding retry logic with backoff\n`;
+            output += `3. Adding fallback behavior\n`;
+            output += `4. Improving error messages\n\n`;
+          }
+
+          output += `### Next Steps\n\n`;
+          output += `To evolve a tool, analyze the failures above and:\n`;
+          output += `1. Design an improved implementation\n`;
+          output += `2. Use \`foundry_add_tool\` to add a new version, or\n`;
+          output += `3. Use \`foundry_extend_self\` to add a wrapper/improvement\n\n`;
+          output += `The new version should address the failure patterns while maintaining the original functionality.\n`;
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_track_outcome ──────────────────────────────────────────────
+      // Outcome-based learning: register a task for feedback tracking
+      {
+        name: "foundry_track_outcome",
+        label: "Track Outcome",
+        description:
+          "Register a task (e.g., TikTok post, tweet, email campaign) for outcome tracking. " +
+          "Later, collect real-world feedback (views, engagement) to learn what works.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            taskType: {
+              type: "string" as const,
+              description: "Type of task (e.g., 'tiktok_post', 'tweet', 'linkedin_post', 'email_campaign')",
+            },
+            taskDescription: {
+              type: "string" as const,
+              description: "Brief description of what was done",
+            },
+            taskParams: {
+              type: "object" as const,
+              description: "Parameters used (content, hashtags, timing, audience, etc.)",
+            },
+            successThreshold: {
+              type: "object" as const,
+              description: "Optional: metrics thresholds for success (e.g., { views: 1000, likes: 50 })",
+            },
+          },
+          required: ["taskType", "taskDescription", "taskParams"] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as {
+            taskType: string;
+            taskDescription: string;
+            taskParams: Record<string, any>;
+            successThreshold?: Record<string, number>;
+          };
+
+          const outcomeId = learningEngine.trackOutcome(
+            p.taskType,
+            p.taskDescription,
+            p.taskParams,
+            p.successThreshold
+          );
+
+          return {
+            content: [{
+              type: "text",
+              text: `Tracking outcome: **${p.taskType}**\n\n` +
+                `**ID**: \`${outcomeId}\`\n` +
+                `**Description**: ${p.taskDescription}\n` +
+                `**Params**: ${JSON.stringify(p.taskParams, null, 2)}\n\n` +
+                `Use \`foundry_record_feedback\` with this ID once you have engagement metrics, ` +
+                `or the system will automatically attempt to collect feedback after 1 hour.`,
+            }],
+          };
+        },
+      },
+
+      // ── foundry_record_feedback ────────────────────────────────────────────
+      // Manually record feedback metrics for a tracked outcome
+      {
+        name: "foundry_record_feedback",
+        label: "Record Feedback",
+        description:
+          "Record real-world feedback metrics for a tracked outcome. " +
+          "This updates the outcome with engagement data and triggers insight regeneration.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            outcomeId: {
+              type: "string" as const,
+              description: "The outcome ID returned by foundry_track_outcome",
+            },
+            metrics: {
+              type: "object" as const,
+              description: "Engagement metrics (e.g., { views: 5000, likes: 120, comments: 15, shares: 8 })",
+            },
+            feedbackSource: {
+              type: "string" as const,
+              description: "Source of the metrics (e.g., 'tiktok_analytics', 'twitter_api', 'manual')",
+            },
+          },
+          required: ["outcomeId", "metrics", "feedbackSource"] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as {
+            outcomeId: string;
+            metrics: Record<string, number>;
+            feedbackSource: string;
+          };
+
+          const outcome = learningEngine.recordFeedback(
+            p.outcomeId,
+            p.metrics,
+            p.feedbackSource
+          );
+
+          if (!outcome) {
+            return {
+              content: [{
+                type: "text",
+                text: `Outcome not found: \`${p.outcomeId}\``,
+              }],
+            };
+          }
+
+          const insights = learningEngine.getTaskInsights(outcome.taskType);
+
+          return {
+            content: [{
+              type: "text",
+              text: `Feedback recorded for **${outcome.taskType}**\n\n` +
+                `**Metrics**: ${JSON.stringify(outcome.metrics)}\n` +
+                `**Success**: ${outcome.success === true ? "✅ Yes" : outcome.success === false ? "❌ No" : "⏳ Pending"}\n\n` +
+                (insights ? `**Updated Insights** (${insights.totalTasks} tasks tracked):\n` +
+                  insights.recommendations.map(r => `- ${r}`).join("\n") : ""),
+            }],
+          };
+        },
+      },
+
+      // ── foundry_get_insights ───────────────────────────────────────────────
+      // Get learned insights for a task type
+      {
+        name: "foundry_get_insights",
+        label: "Get Outcome Insights",
+        description:
+          "Get learned insights and recommendations for a task type based on past outcomes. " +
+          "Use this before executing a task to apply what worked before.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            taskType: {
+              type: "string" as const,
+              description: "Type of task (e.g., 'tiktok_post', 'tweet'). Leave empty to list all task types.",
+            },
+          },
+          required: [] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { taskType?: string };
+
+          if (!p.taskType) {
+            // List all task types with insights
+            const taskTypes = learningEngine.getAllTaskTypes();
+            if (taskTypes.length === 0) {
+              return {
+                content: [{
+                  type: "text",
+                  text: "No outcome insights yet. Use `foundry_track_outcome` to start tracking tasks.",
+                }],
+              };
+            }
+
+            let output = `## Task Types with Insights\n\n`;
+            for (const type of taskTypes) {
+              const insights = learningEngine.getTaskInsights(type);
+              if (insights) {
+                output += `- **${type}**: ${insights.totalTasks} tasks (${insights.successfulTasks} successful)\n`;
+              }
+            }
+            output += `\nUse \`foundry_get_insights\` with a specific taskType for detailed recommendations.`;
+            return { content: [{ type: "text", text: output }] };
+          }
+
+          const insights = learningEngine.getTaskInsights(p.taskType);
+          if (!insights || insights.totalTasks === 0) {
+            return {
+              content: [{
+                type: "text",
+                text: `No insights for **${p.taskType}** yet. Track some outcomes first.`,
+              }],
+            };
+          }
+
+          let output = `## Insights: ${p.taskType}\n\n`;
+          output += `**Total Tasks**: ${insights.totalTasks} (${insights.successfulTasks} successful)\n\n`;
+
+          if (Object.keys(insights.avgMetrics).length > 0) {
+            output += `**Average Metrics**:\n`;
+            for (const [key, value] of Object.entries(insights.avgMetrics)) {
+              output += `- ${key}: ${value}\n`;
+            }
+            output += `\n`;
+          }
+
+          if (insights.recommendations.length > 0) {
+            output += `**Recommendations**:\n`;
+            for (const rec of insights.recommendations) {
+              output += `- ${rec}\n`;
+            }
+            output += `\n`;
+          }
+
+          if (insights.patterns.successful.length > 0) {
+            output += `**Successful Patterns**:\n`;
+            for (const pat of insights.patterns.successful) {
+              output += `- ${pat}\n`;
+            }
+            output += `\n`;
+          }
+
+          if (insights.patterns.unsuccessful.length > 0) {
+            output += `**Patterns to Avoid**:\n`;
+            for (const pat of insights.patterns.unsuccessful) {
+              output += `- ${pat}\n`;
+            }
+            output += `\n`;
+          }
+
+          if (insights.topPerformers.length > 0) {
+            output += `**Top Performers**:\n`;
+            for (const top of insights.topPerformers) {
+              output += `- ${top.taskDescription.slice(0, 50)}... (${JSON.stringify(top.metrics)})\n`;
+            }
+          }
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_pending_feedback ───────────────────────────────────────────
+      // List outcomes pending feedback collection
+      {
+        name: "foundry_pending_feedback",
+        label: "Pending Feedback",
+        description:
+          "List outcomes that are awaiting feedback collection. " +
+          "These are tasks that were tracked but haven't had metrics recorded yet.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            taskType: {
+              type: "string" as const,
+              description: "Filter by task type (optional)",
+            },
+          },
+          required: [] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { taskType?: string };
+          const pending = learningEngine.getPendingFeedback(p.taskType);
+
+          if (pending.length === 0) {
+            return {
+              content: [{
+                type: "text",
+                text: "No outcomes pending feedback collection.",
+              }],
+            };
+          }
+
+          let output = `## Pending Feedback Collection\n\n`;
+          output += `${pending.length} outcomes awaiting metrics:\n\n`;
+
+          for (const outcome of pending.slice(0, 10)) {
+            const age = Math.round((Date.now() - new Date(outcome.executedAt).getTime()) / (60 * 60 * 1000));
+            output += `- **${outcome.taskType}** (\`${outcome.id}\`)\n`;
+            output += `  - ${outcome.taskDescription.slice(0, 60)}...\n`;
+            output += `  - Executed: ${age}h ago\n`;
+          }
+
+          if (pending.length > 10) {
+            output += `\n...and ${pending.length - 10} more.`;
+          }
+
+          output += `\n\nUse \`foundry_record_feedback\` to record metrics for these outcomes.`;
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
+
+      // ── foundry_apply_improvement ──────────────────────────────────────────
+      // Apply learned improvements to skills/extensions
+      {
+        name: "foundry_apply_improvement",
+        label: "Apply Improvement",
+        description:
+          "Apply a learned improvement suggestion to a skill or extension. " +
+          "This generates the necessary code changes based on outcome-based learnings.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            taskType: {
+              type: "string" as const,
+              description: "The task type with the improvement suggestion",
+            },
+            confirm: {
+              type: "boolean" as const,
+              description: "Set to true to apply the changes (default: preview only)",
+            },
+          },
+          required: ["taskType"] as string[],
+        },
+        async execute(_toolCallId: string, params: unknown) {
+          const p = params as { taskType: string; confirm?: boolean };
+          const insights = learningEngine.getTaskInsights(p.taskType);
+
+          if (!insights?.improvementSuggestion) {
+            return {
+              content: [{
+                type: "text",
+                text: `No improvement suggestion available for **${p.taskType}**.\n\n` +
+                  `Available suggestions:\n` +
+                  learningEngine.getImprovementSuggestions()
+                    .map(s => `- **${s.taskType}**: ${s.suggestion.suggestedChanges[0]}...`)
+                    .join("\n") || "None",
+              }],
+            };
+          }
+
+          const suggestion = insights.improvementSuggestion;
+
+          if (suggestion.appliedAt) {
+            return {
+              content: [{
+                type: "text",
+                text: `Improvement for **${p.taskType}** was already applied on ${suggestion.appliedAt}.`,
+              }],
+            };
+          }
+
+          let output = `## Improvement Suggestion for ${p.taskType}\n\n`;
+          output += `**Confidence**: ${(suggestion.confidence * 100).toFixed(0)}%\n`;
+          output += `**Based on**: ${insights.totalTasks} tracked outcomes (${insights.successfulTasks} successful)\n\n`;
+
+          output += `**Suggested Changes**:\n`;
+          for (const change of suggestion.suggestedChanges) {
+            output += `- ${change}\n`;
+          }
+          output += `\n`;
+
+          if (suggestion.targetSkill) {
+            output += `**Target Skill**: ${suggestion.targetSkill}\n\n`;
+          }
+
+          if (p.confirm) {
+            // Generate improvement prompt for the LLM to implement
+            output += `---\n\n`;
+            output += `## Implementation Prompt\n\n`;
+            output += `Apply these improvements to the ${suggestion.targetSkill || p.taskType} skill/tool:\n\n`;
+
+            for (const change of suggestion.suggestedChanges) {
+              output += `1. ${change}\n`;
+            }
+
+            output += `\nBased on outcome data:\n`;
+            output += `- Best performers had: ${insights.patterns.successful.slice(0, 2).join("; ")}\n`;
+            if (insights.patterns.unsuccessful.length > 0) {
+              output += `- Avoid: ${insights.patterns.unsuccessful[0]}\n`;
+            }
+
+            output += `\nUse \`foundry_extend_self\` or \`foundry_add_hook\` to implement these changes.\n`;
+            output += `After implementation, use \`foundry_restart\` to apply.\n\n`;
+
+            // Mark as applied (LLM is now responsible for implementing)
+            learningEngine.markImprovementApplied(p.taskType);
+            output += `✅ Improvement marked as applied.`;
+          } else {
+            output += `\nRun with \`confirm: true\` to generate the implementation prompt.`;
+          }
+
+          return { content: [{ type: "text", text: output }] };
+        },
+      },
       ];
 
       return toolList;
@@ -2491,10 +4298,19 @@ ${p.toolCode.split("\n").map((l: string) => "          " + l).join("\n")}
       "foundry_extend_self",
       "foundry_restart",
       "foundry_learnings",
-      "foundry_overseer",
-      "foundry_crystallize",
       "foundry_publish_ability",
       "foundry_marketplace",
+      "foundry_overseer",
+      "foundry_crystallize",
+      "foundry_save_hook",
+      "foundry_metrics",
+      "foundry_evolve",
+      // Outcome-based learning
+      "foundry_track_outcome",
+      "foundry_record_feedback",
+      "foundry_get_insights",
+      "foundry_pending_feedback",
+      "foundry_apply_improvement",
     ];
 
     api.registerTool(tools, { names: toolNames });
@@ -2540,8 +4356,89 @@ ${insights.map(i => `- **Insight**: ${i.context?.slice(0, 100)}`).join("\n")}
 `;
       }
 
+      // ADAS: Proactive evolution injection
+      // Check if overseer found underperforming tools that need evolution
+      const overseerReport = learningEngine.getLastOverseerReport();
+      let evolutionContext = "";
+
+      if (overseerReport?.evolutionCandidates && overseerReport.evolutionCandidates.length > 0) {
+        const topCandidates = overseerReport.evolutionCandidates.slice(0, 3);
+        evolutionContext = `
+## ⚠️ PROACTIVE EVOLUTION NEEDED
+
+The following tools are underperforming and may benefit from evolution:
+
+${topCandidates.map(t => {
+          const totalCalls = t.successCount + t.failureCount;
+          const avgLatency = totalCalls > 0 ? (t.totalLatencyMs / totalCalls).toFixed(0) : "N/A";
+          return `- **${t.toolName}**: ${(t.fitness * 100).toFixed(0)}% fitness (${t.successCount}/${totalCalls} success, avg ${avgLatency}ms)`;
+        }).join("\n")}
+
+Consider using \`foundry_evolve\` to analyze and improve these tools, or investigate why they're failing.
+
+`;
+      }
+
+      // Include recurring failures that need attention
+      if (overseerReport?.recurringFailures && overseerReport.recurringFailures.length > 0) {
+        const topFailures = overseerReport.recurringFailures.slice(0, 2);
+        evolutionContext += `
+## 🔁 Recurring Failures
+
+${topFailures.map(f => `- **${f.signature}**: ${f.count}x failures - needs resolution pattern`).join("\n")}
+
+Consider using \`foundry_crystallize\` after resolving these to prevent future occurrences.
+
+`;
+      }
+
+      // Outcome-based learning: inject insights for task types the agent has learned about
+      let outcomeInsights = "";
+      const taskTypes = learningEngine.getAllTaskTypes();
+      if (taskTypes.length > 0) {
+        outcomeInsights = `
+## 📊 Outcome-Based Learnings
+
+You have feedback data for: ${taskTypes.join(", ")}
+
+`;
+        // Include top 2 task type summaries
+        for (const taskType of taskTypes.slice(0, 2)) {
+          const typeInsights = learningEngine.getTaskInsights(taskType);
+          if (typeInsights && typeInsights.recommendations.length > 0) {
+            outcomeInsights += `**${taskType}** (${typeInsights.totalTasks} tracked, ${typeInsights.successfulTasks} successful):\n`;
+            outcomeInsights += typeInsights.recommendations.slice(0, 3).map(r => `- ${r}`).join("\n") + "\n\n";
+          }
+        }
+
+        outcomeInsights += `Use \`foundry_get_insights\` for detailed recommendations before executing similar tasks.
+Use \`foundry_track_outcome\` after executing tasks to continue learning.
+
+`;
+      }
+
+      // Check for pending feedback that should be collected
+      const pendingFeedback = learningEngine.getPendingFeedback();
+      if (pendingFeedback.length > 0) {
+        outcomeInsights += `**⏳ ${pendingFeedback.length} outcomes awaiting feedback** - consider collecting metrics.\n\n`;
+      }
+
+      // Check for improvement suggestions that should be applied
+      const improvementSuggestions = learningEngine.getImprovementSuggestions();
+      if (improvementSuggestions.length > 0) {
+        outcomeInsights += `## 🔧 SKILL IMPROVEMENTS READY\n\n`;
+        outcomeInsights += `Based on outcome data, these skills should be upgraded:\n\n`;
+        for (const { taskType, suggestion } of improvementSuggestions.slice(0, 2)) {
+          outcomeInsights += `- **${taskType}** (${(suggestion.confidence * 100).toFixed(0)}% confidence):\n`;
+          for (const change of suggestion.suggestedChanges.slice(0, 2)) {
+            outcomeInsights += `  - ${change}\n`;
+          }
+        }
+        outcomeInsights += `\nUse \`foundry_apply_improvement\` to implement these upgrades.\n\n`;
+      }
+
       return {
-        prependContext: `${resumeContext}${learningsContext}
+        prependContext: `${resumeContext}${evolutionContext}${outcomeInsights}${learningsContext}
 ## Foundry: Self-Writing Coding Subagent
 
 Grounded in **docs.molt.bot** — fetches documentation on demand. Can modify its own source code.
@@ -2551,47 +4448,131 @@ Grounded in **docs.molt.bot** — fetches documentation on demand. Can modify it
 **Tools**:
 - \`foundry_research\` — Search docs.molt.bot for best practices
 - \`foundry_implement\` — Research + implement a capability (fetches docs)
-- \`foundry_write_extension\` — Create a clawdbot extension
+- \`foundry_write_extension\` — Create an OpenClaw extension
 - \`foundry_write_skill\` — Create a skill package
 - \`foundry_extend_self\` — **Write new tools into foundry itself**
 - \`foundry_restart\` — Restart gateway and resume conversation
+- \`foundry_evolve\` — **ADAS**: Analyze underperforming tools and generate evolved versions
+- \`foundry_crystallize\` — **HexMachina**: Convert learned patterns into permanent hooks
+
+**Outcome Learning**:
+- \`foundry_track_outcome\` — Register a task (TikTok post, tweet, etc.) for feedback tracking
+- \`foundry_record_feedback\` — Record engagement metrics (views, likes, etc.)
+- \`foundry_get_insights\` — Get learned recommendations for a task type
 
 When you need a new capability:
 1. \`foundry_research\` — understand the API
 2. \`foundry_implement\` — get implementation guidance
 3. \`foundry_write_*\` or \`foundry_extend_self\` — write the code
 4. \`foundry_restart\` — restart gateway to load, auto-resumes
+
+**Feedback Loop**: After tasks like social posts, track outcomes and collect metrics. Insights will improve future runs.
 `,
       };
     });
 
     // ── after_tool_call Hook ─────────────────────────────────────────────────
-    // Proactively learn from tool failures and successes
+    // RISE: Recursive introspection with context injection
+    // ADAS: Tool performance tracking for fitness evolution
     api.on("after_tool_call", async (event: any, ctx: any) => {
-      const { toolName, result, error } = event;
+      const { toolName, result, error, startTime } = event;
+      const latencyMs = startTime ? Date.now() - startTime : 0;
 
       // Skip our own tools to avoid recursive learning
       if (toolName?.startsWith("foundry_")) return;
 
-      // Learn from failures
-      if (error || (result && typeof result === "object" && (result as any).error)) {
+      const isError = error || (result && typeof result === "object" && (result as any).error);
+
+      // ADAS: Record tool execution metrics
+      learningEngine.recordToolExecution(toolName || "unknown", !isError, latencyMs);
+
+      if (isError) {
         const errorMsg = error || (result as any).error || "Unknown error";
+        const errorStr = typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg);
+
+        // RISE: Check for existing pattern before recording new failure
+        const existingPattern = learningEngine.findSimilarPattern(toolName || "unknown", errorStr);
+
+        if (existingPattern && existingPattern.resolution) {
+          // RISE: We have a learned pattern! Inject context for retry
+          logger.info(`[foundry] RISE: Injecting learned pattern for ${toolName}`);
+          learningEngine.recordPatternUse(existingPattern.id);
+
+          // Track which pattern was injected so we can detect success
+          lastInjectedPatternId = existingPattern.id;
+          lastInjectedForTool = toolName || "unknown";
+
+          // Inject resolution into conversation context
+          if (ctx?.injectSystemMessage) {
+            ctx.injectSystemMessage(`
+[FOUNDRY LEARNED PATTERN]
+Similar error was previously resolved:
+Tool: ${existingPattern.tool}
+Error pattern: ${existingPattern.error?.slice(0, 100)}
+Resolution: ${existingPattern.resolution}
+
+Apply this resolution to the current failure.
+`);
+          }
+        }
+
+        // Record the failure with SelfEvolve feedback if available
+        const feedback = (result as any)?.stderr || (result as any)?.trace;
         lastFailureId = learningEngine.recordFailure(
           toolName || "unknown",
-          typeof errorMsg === "string" ? errorMsg : JSON.stringify(errorMsg),
-          ctx?.lastUserMessage?.slice(0, 200)
+          errorStr,
+          ctx?.lastUserMessage?.slice(0, 200),
+          feedback
         );
-
-        // Check if we have a pattern for this
-        const relevant = learningEngine.findRelevantLearnings(toolName);
-        if (relevant.length > 0) {
-          logger.info(`[foundry] Found ${relevant.length} relevant patterns for ${toolName} failure`);
-        }
       } else {
-        // Record success for frequently used tools
+        // RISE: Check if this success followed a pattern injection
+        if (lastInjectedPatternId && lastInjectedForTool === toolName) {
+          // Pattern was used and retry succeeded!
+          logger.info(`[foundry] RISE: Pattern ${lastInjectedPatternId} succeeded for ${toolName}`);
+          learningEngine.recordPatternSuccess(lastInjectedPatternId);
+
+          // Check if pattern should be auto-crystallized
+          const pattern = learningEngine.getPattern(lastInjectedPatternId);
+          if (pattern && learningEngine.shouldAutoCrystallize(pattern)) {
+            logger.info(`[foundry] RISE: Auto-crystallizing pattern ${lastInjectedPatternId} after ${pattern.useCount} successful uses`);
+            // Trigger crystallization - write the hook
+            const hookId = `rise_crystallized_${pattern.tool}_${Date.now()}`;
+            const hooksDir = join(dataDir, "hooks");
+            if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true });
+
+            const escapedError = (pattern.error || "").replace(/`/g, "'").slice(0, 100);
+            const escapedResolution = (pattern.resolution || "").replace(/`/g, "'").slice(0, 200);
+
+            const hookCode = `
+    // RISE auto-crystallized from pattern: ${pattern.id}
+    // Triggered after ${pattern.useCount} successful retry uses
+    api.on("before_tool_call", async (event, ctx) => {
+      if (event.toolName === "${pattern.tool}") {
+        // Original error: ${escapedError}
+        // Learned resolution: ${escapedResolution}
+        if (ctx?.injectSystemMessage) {
+          ctx.injectSystemMessage(\`
+[RISE CRYSTALLIZED PATTERN]
+Before calling ${pattern.tool}, apply this proven approach:
+${escapedResolution}
+\`);
+        }
+      }
+    });`;
+
+            const hookPath = join(hooksDir, `${hookId}.ts`);
+            writeFileSync(hookPath, hookCode);
+            learningEngine.markCrystallized(lastInjectedPatternId, hookId);
+            logger.info(`[foundry] RISE: Wrote crystallized hook to ${hookPath}`);
+          }
+
+          lastInjectedPatternId = null;
+          lastInjectedForTool = null;
+        }
+
+        // Record success and potential resolution
         if (lastFailureId && toolName) {
-          // If we just had a failure and now succeeded, record the resolution
-          learningEngine.recordResolution(lastFailureId, `Succeeded with ${toolName}`);
+          learningEngine.recordResolution(lastFailureId, `Succeeded after retry with ${toolName}`);
           lastFailureId = null;
         }
       }
@@ -2631,5 +4612,14 @@ When you need a new capability:
       const pending = learningEngine.getPendingSession();
       logger.info(`[foundry] ⚡ Pending session found: ${pending?.reason}`);
     }
+
+    // Self-Improving Coding Agent (arXiv:2504.15228): Start autonomous overseer
+    // Runs every hour to auto-crystallize patterns and report recurring failures
+    // Run immediately once to populate lastOverseerReport for proactive evolution injection
+    const initialReport = learningEngine.runOverseer(dataDir);
+    logger.info(`[foundry] Initial overseer run: ${initialReport.evolutionCandidates.length} evolution candidates, ${initialReport.recurringFailures.length} recurring failures`);
+
+    learningEngine.startOverseer(60 * 60 * 1000, dataDir);
+    logger.info(`[foundry] Autonomous overseer scheduled (1h interval)`);
   },
 };

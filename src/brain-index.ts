@@ -8,7 +8,7 @@
  *   - skill:      API skills (endpoints, auth, templates)
  *   - pattern:    Failure resolution patterns from unlearn
  *   - technique:  Reusable code snippets
- *   - extension:  Full clawdbot plugins
+ *   - extension:  Full OpenClaw plugins
  *   - insight:    Successful approaches
  *   - agent:      High-fitness agent designs
  */

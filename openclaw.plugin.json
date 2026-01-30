@@ -1,0 +1,52 @@
+{
+  "id": "foundry",
+  "name": "Foundry",
+  "description": "Self-writing meta-extension that forges new capabilities — researches docs, writes extensions, tools, hooks, and skills",
+  "version": "0.2.0",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dataDir": {
+        "type": "string",
+        "description": "Directory to store forged artifacts (default: ~/.openclaw/foundry)"
+      },
+      "openclawPath": {
+        "type": "string",
+        "description": "Path to OpenClaw installation for loading local docs"
+      },
+      "autoLearn": {
+        "type": "boolean",
+        "description": "Automatically learn from agent failures and successes",
+        "default": true
+      },
+      "sources": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "arxiv": { "type": "boolean", "description": "Learn from arXiv papers", "default": true },
+          "github": { "type": "boolean", "description": "Learn from GitHub repos", "default": true },
+          "docs": { "type": "boolean", "description": "Learn from OpenClaw documentation", "default": true },
+          "experience": { "type": "boolean", "description": "Learn from own successes/failures", "default": true }
+        }
+      },
+      "marketplace": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string", "description": "Foundry marketplace URL", "default": "https://skills.molt.bot" },
+          "autoPublish": { "type": "boolean", "description": "Auto-publish high-value patterns", "default": false }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "dataDir": { "label": "Data Directory", "placeholder": "~/.openclaw/foundry" },
+    "openclawPath": { "label": "OpenClaw Path", "placeholder": "/path/to/openclaw" },
+    "autoLearn": { "label": "Auto-Learn", "help": "Automatically learn from agent activity" },
+    "sources.docs": { "label": "Learn from Docs", "help": "Fetch and learn from OpenClaw documentation" },
+    "marketplace.url": { "label": "Marketplace URL", "sensitive": false },
+    "marketplace.autoPublish": { "label": "Auto-Publish", "help": "Automatically share high-value patterns" }
+  }
+}
