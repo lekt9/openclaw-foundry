@@ -298,6 +298,37 @@ foundry_marketplace action="install" id="abc123"
 }
 ```
 
+## Research Foundations
+
+Foundry's self-improvement mechanisms draw from recent advances in autonomous learning agents:
+
+### Self-Improving Code Agents
+
+| Paper | Key Insight | Foundry Application |
+|-------|-------------|---------------------|
+| [Self-Improving Coding Agent](https://arxiv.org/abs/2504.15228) (Robeyns et al., 2025) | Agent systems with coding tools can autonomously edit themselves, achieving 17-53% improvement through "non-gradient learning via LLM reflection and code updates" | `foundry_extend_self` — the agent modifies its own codebase |
+| [From Language Models to Practical Self-Improving Computer Agents](https://arxiv.org/abs/2404.11964) (Shinn et al., 2024) | LLM agents can "systematically generate software to augment themselves" starting from minimal capabilities | Self-written tools/hooks that expand Foundry's capabilities |
+| [SelfEvolve](https://arxiv.org/abs/2306.02907) (Jiang et al., 2023) | Two-step pipeline: knowledge generation + self-reflection debugging using interpreter feedback | LearningEngine records failures → resolutions → patterns |
+
+### Recursive Introspection
+
+| Paper | Key Insight | Foundry Application |
+|-------|-------------|---------------------|
+| [RISE: Recursive Introspection](https://arxiv.org/abs/2407.18219) (Qu et al., 2024) | Iterative fine-tuning teaches models to "alter responses after unsuccessful attempts" via multi-turn MDPs | `after_tool_call` hook learns from failures, injects fixes |
+| [HexMachina](https://arxiv.org/abs/2506.04651) (Liu et al., 2025) | "Artifact-centric continual learning" — separates discovery from strategy evolution through code refinement | Patterns (knowledge) crystallize into hooks/tools (behavior) |
+
+### Meta-Agent Search
+
+| Paper | Key Insight | Foundry Application |
+|-------|-------------|---------------------|
+| [ADAS: Automated Design of Agentic Systems](https://arxiv.org/abs/2408.08435) (Hu et al., 2024) | Meta-agent iteratively discovers improved agent designs through archive-based evolution | `meta-agent-search.ts` — evolves agent patterns in marketplace |
+
+### Core Principle
+
+> "An agent system, equipped with basic coding tools, can autonomously edit itself, and thereby improve its performance" — Robeyns et al.
+
+Foundry operationalizes this: the system that writes the code IS the code being written.
+
 ## License
 
 MIT
