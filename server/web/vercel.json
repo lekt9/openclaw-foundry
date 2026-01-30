@@ -1,10 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "vite",
-  "rewrites": [
-    {
-      "source": "/skills/:path*",
-      "destination": "https://api.forge.getfoundry.app/skills/:path*"
-    }
-  ]
+  "framework": "vite"
 }

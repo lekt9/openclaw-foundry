@@ -8,7 +8,7 @@ export function Header() {
     <header className="header">
       <div className="header-inner">
         <Link to="/" className="logo">
-          <span className="logo-icon">⚒</span>
+          <img src="/logo.png" alt="Foundry" className="logo-icon" />
           <span>Foundry</span>
         </Link>
 

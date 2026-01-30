@@ -176,12 +176,8 @@ code, pre {
 .logo-icon {
   width: 32px;
   height: 32px;
-  background: linear-gradient(135deg, var(--ember), var(--molten));
   border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.875rem;
+  object-fit: contain;
   box-shadow: var(--shadow-glow);
 }
 

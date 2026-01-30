@@ -38,9 +38,11 @@ export interface SearchResult {
   total: number;
 }
 
+const API_BASE = "https://api.forge.getfoundry.app";
+
 /** Search skills (free). */
 export async function searchSkills(query: string, limit = 20): Promise<SearchResult> {
-  const url = new URL("/skills/search", window.location.origin);
+  const url = new URL(`${API_BASE}/skills/search`);
   if (query) url.searchParams.set("q", query);
   url.searchParams.set("limit", String(limit));
 
@@ -51,7 +53,7 @@ export async function searchSkills(query: string, limit = 20): Promise<SearchRes
 
 /** Get skill summary with endpoints (free). */
 export async function getSkillSummary(id: string): Promise<SkillDetail> {
-  const resp = await fetch(`/skills/${encodeURIComponent(id)}/summary`);
+  const resp = await fetch(`${API_BASE}/skills/${encodeURIComponent(id)}/summary`);
   if (!resp.ok) throw new Error(`Summary failed: ${resp.status}`);
   return resp.json();
 }
@@ -71,7 +73,7 @@ export async function downloadSkill(
   publicKey: string,
 ): Promise<SkillPackage> {
   // Step 1: Initial request — expect 402 (or 200 in dev mode)
-  const resp = await fetch(`/skills/${encodeURIComponent(id)}/download`);
+  const resp = await fetch(`${API_BASE}/skills/${encodeURIComponent(id)}/download`);
 
   if (resp.ok) {
     return resp.json();
@@ -91,7 +93,7 @@ export async function downloadSkill(
   const paymentData = await buildPaymentTransaction(accepts, signTransaction, publicKey);
 
   // Step 4: Retry with payment
-  const retryResp = await fetch(`/skills/${encodeURIComponent(id)}/download`, {
+  const retryResp = await fetch(`${API_BASE}/skills/${encodeURIComponent(id)}/download`, {
     headers: { "X-Payment": paymentData },
   });
 
