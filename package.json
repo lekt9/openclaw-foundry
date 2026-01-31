@@ -1,6 +1,6 @@
 {
   "name": "@getfoundry/foundry-openclaw",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The forge that forges itself — self-writing meta-extension for OpenClaw",
   "type": "module",
   "main": "index.ts",

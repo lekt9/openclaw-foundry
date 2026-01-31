@@ -186,34 +186,30 @@ This is **recursive self-improvement** — each capability makes acquiring the n
 
 ## Installation
 
-Give your OpenClaw agent instant access to self-writing capabilities.
-
-**Just tell it:**
-
-```
-"install @getfoundry/foundry-openclaw"
-```
-
-That's it. The agent handles the rest.
-
----
-
-### Manual Options
-
-**npm:**
 ```bash
 openclaw plugins install @getfoundry/foundry-openclaw
 ```
 
-**Or add to config** (`~/.openclaw/openclaw.json`):
+That's it. This will download, extract, enable, and load Foundry automatically.
+
+---
+
+### Alternative: Manual Config
+
+Add to `~/.openclaw/openclaw.json`:
 ```json
 {
   "plugins": {
     "entries": {
-      "foundry": { "enabled": true, "source": "npm:@getfoundry/foundry-openclaw" }
+      "foundry": { "enabled": true }
     }
   }
 }
+```
+
+Then restart:
+```bash
+openclaw gateway restart
 ```
 
 ### Option C: GitHub Source

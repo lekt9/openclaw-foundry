@@ -2,7 +2,7 @@
 name: foundry
 description: Self-writing meta-extension that forges new capabilities — researches docs, writes extensions, tools, hooks, and skills
 homepage: https://getfoundry.app
-user-invocable: false
+user-invocable: true
 metadata: {"openclaw":{"requires":{"bins":["node"]},"repository":"github:lekt9/openclaw-foundry"}}
 ---
 
@@ -10,30 +10,30 @@ metadata: {"openclaw":{"requires":{"bins":["node"]},"repository":"github:lekt9/o
 
 **The forge that forges itself.** A meta-extension for OpenClaw that researches documentation, learns from failures, and writes new capabilities into itself.
 
-## Quick Start
+## Installation
 
-**Just tell your agent:**
-
-```
-"install @getfoundry/foundry-openclaw"
-```
-
-That's it.
-
----
-
-### Manual Install
+When the user asks to install Foundry or `@getfoundry/foundry-openclaw`, run this command:
 
 ```bash
 openclaw plugins install @getfoundry/foundry-openclaw
 ```
 
-Or add to `~/.openclaw/openclaw.json`:
+This will:
+1. Download the plugin from npm
+2. Extract to `~/.openclaw/extensions/foundry/`
+3. Enable it automatically
+4. Restart the gateway to load
+
+After installation, the user will have access to all Foundry tools like `foundry_research`, `foundry_write_extension`, etc.
+
+## Alternative: Manual Config
+
+Add to `~/.openclaw/openclaw.json`:
 ```json
 {
   "plugins": {
     "entries": {
-      "foundry": { "enabled": true, "source": "npm:@getfoundry/foundry-openclaw" }
+      "foundry": { "enabled": true }
     }
   }
 }
