@@ -81,6 +81,10 @@ Generates extensions/skills/tools. Validates in sandbox before writing.
 ### LearningEngine
 Records patterns from failures/successes. Injects context into conversations.
 
+**Key data:**
+- `~/.openclaw/foundry/learnings.json` — All failures, patterns, insights
+- Patterns = failures with linked resolutions
+
 ### CodeValidator
 Static security scan + isolated process sandbox testing.
 
@@ -94,20 +98,46 @@ Extensions are tested in isolated process before deployment:
 5. If fails → reject, gateway stays safe
 6. If passes → deploy to real extensions
 
-## Proactive Learning
+## Learning Engine
 
-Foundry observes tool calls and learns:
-- **Failures** → Records error + context
-- **Resolutions** → Links fix to failure → Creates pattern
-- **Patterns** → Injected as context in future conversations
-- **Auto-publish** → Shares high-value patterns to Foundry Marketplace (opt-in)
+### How Patterns Are Created
+1. **Extension fails** → `recordFailure()` stores error with context
+2. **Extension succeeds** (same ID) → `recordResolution()` links success to previous failure
+3. **Pattern created** → failure + resolution = reusable pattern
 
-### How It Adapts
-1. Observes tool failures and successes
-2. Records patterns (error → fix mappings)
-3. Injects relevant patterns into agent context
-4. Suggests fixes proactively when similar errors occur
-5. Publishes high-value patterns to help others
+### Auto-Promotion
+Known error patterns are auto-promoted with standard resolutions:
+- `Cannot use import statement` → Use inline code only
+- `BLOCKED: Child process import` → Use HTTP APIs instead
+- `BLOCKED: Shell execution` → Use direct API calls
+- `Sandbox failed` → Handle null/undefined, use try/catch
+
+### Overseer (Autonomous Actions)
+Runs every hour to:
+1. Auto-crystallize high-value patterns (5+ uses) into hooks
+2. Prune stale unused patterns (30+ days)
+3. Create insights for recurring failures (5+ occurrences)
+4. Auto-promote known error patterns
+
+### Pattern Lifecycle
+```
+failure (unresolved)
+    ↓ success with same extension ID
+pattern (has resolution)
+    ↓ used 3+ times successfully
+crystallization candidate
+    ↓ used 5+ times
+crystallized hook (permanent)
+```
+
+### Debugging
+```bash
+# Check learnings
+cat ~/.openclaw/foundry/learnings.json | jq '.[] | select(.type=="failure")'
+
+# Check logs
+tail -f ~/.openclaw/logs/gateway.log | grep foundry
+```
 
 ## Security
 

@@ -1647,6 +1647,12 @@ ${escapedResolution}
       }
     }
 
+    // AUTONOMOUS ACTION 4: Auto-promote known error patterns
+    const autoPromoted = this.autoPromoteKnownPatterns();
+    if (autoPromoted > 0) {
+      report.actionsExecuted.push(`Auto-promoted ${autoPromoted} known error patterns`);
+    }
+
     this.logger?.info(
       `[foundry] Overseer: ${report.patternsAnalyzed} patterns, ${report.crystallizationCandidates.length} candidates, ${report.recurringFailures.length} recurring failures, ${report.evolutionCandidates.length} evolution candidates, ${report.actionsExecuted.length} actions taken`,
     );
@@ -1676,6 +1682,53 @@ ${escapedResolution}
       clearInterval(this.overseerInterval);
       this.overseerInterval = null;
     }
+  }
+
+  // Auto-promote known error patterns with standard resolutions
+  autoPromoteKnownPatterns(): number {
+    const KNOWN_PATTERNS: { match: RegExp; resolution: string }[] = [
+      {
+        match: /Cannot use import statement outside a module/i,
+        resolution: "Use inline code only. Do not use import/require statements. All dependencies must be inlined or use global APIs available in the plugin context.",
+      },
+      {
+        match: /BLOCKED: Child process import/i,
+        resolution: "Do not import child_process, exec, spawn, or execSync. Use HTTP APIs or built-in Node APIs instead of shell commands.",
+      },
+      {
+        match: /BLOCKED: Shell execution/i,
+        resolution: "Do not use exec(), spawn(), or shell commands. Use direct API calls or the plugin SDK methods instead.",
+      },
+      {
+        match: /BLOCKED: Dynamic code execution/i,
+        resolution: "Do not use eval() or new Function(). Use static code patterns only.",
+      },
+      {
+        match: /Sandbox.*failed|runtime.*error/i,
+        resolution: "Ensure all variables are defined before use, handle null/undefined cases, and use try/catch for async operations.",
+      },
+    ];
+
+    let promoted = 0;
+    const unresolved = this.learnings.filter(l => l.type === "failure" && !l.resolution);
+
+    for (const failure of unresolved) {
+      const error = failure.error || "";
+      for (const { match, resolution } of KNOWN_PATTERNS) {
+        if (match.test(error)) {
+          failure.resolution = resolution;
+          failure.type = "pattern";
+          promoted++;
+          this.logger?.info(`[foundry] Auto-promoted pattern: ${error.slice(0, 50)}...`);
+          break;
+        }
+      }
+    }
+
+    if (promoted > 0) {
+      this.saveLearnings();
+    }
+    return promoted;
   }
 
   recordSuccess(tool: string, context: string): void {
@@ -2783,6 +2836,8 @@ export default {
     // RISE: Track pattern used for injection (to detect successful retries)
     let lastInjectedPatternId: string | null = null;
     let lastInjectedForTool: string | null = null;
+    // Track failures per extension/skill ID for learning resolution
+    const pendingFailures = new Map<string, { failureId: string; error: string; timestamp: number }>();
 
     // ── Tools ───────────────────────────────────────────────────────────────
 
@@ -2793,7 +2848,7 @@ export default {
           name: "foundry_research",
           label: "Research Documentation",
           description:
-            "Search docs.molt.bot for best practices. Use this before implementing to understand " +
+            "Search docs.openclaw.ai for best practices. Use before implementing to understand " +
             "the OpenClaw API, patterns, and conventions.",
           parameters: {
             type: "object" as const,
@@ -2896,13 +2951,11 @@ export default {
               targetExtension?: string;
             };
 
-            // Build research context - fetch from docs.molt.bot
-            let context = `## Research Context\n\n`;
-            context += `**Capability requested**: ${p.capability}\n`;
+            // Build context from platform docs
+            let context = `## Implementation: ${p.capability}\n\n`;
             context += `**Type**: ${p.type}\n\n`;
-            context += `**Documentation source**: docs.molt.bot\n\n`;
 
-            // Fetch relevant docs based on type
+            // Fetch relevant docs
             try {
               const relevantTopics: string[] = [];
               if (p.type === "extension" || p.type === "tool")
@@ -2911,34 +2964,21 @@ export default {
                 relevantTopics.push("hooks");
               if (p.type === "skill") relevantTopics.push("skills");
 
-              // Also search for capability-specific docs
-              const searchResults = await docsFetcher.search(p.capability);
-
-              context += `### Relevant Documentation\n\n`;
-              context += searchResults.slice(0, 4000) + "\n\n";
-
-              // Also fetch specific topic docs
               for (const topic of relevantTopics) {
                 const topicDocs = await docsFetcher.fetchForTopic(topic);
                 context += `### ${topic.charAt(0).toUpperCase() + topic.slice(1)} API\n\n`;
                 context += topicDocs.slice(0, 2000) + "\n\n";
               }
             } catch (err) {
-              // Fallback to local docs if fetch fails
               const docs = writer.getDocs();
               if (docs.plugin) {
                 context += `### Plugin API (local)\n\n`;
                 context += docs.plugin.slice(0, 3000) + "\n\n";
               }
-              if (docs.hooks) {
-                context += `### Hooks API (local)\n\n`;
-                context += docs.hooks.slice(0, 2000) + "\n\n";
-              }
             }
 
-            // Provide implementation guidance
+            // Implementation guidance
             context += `## Implementation Guide\n\n`;
-            context += `Based on the docs, here's how to implement "${p.capability}":\n\n`;
 
             switch (p.type) {
               case "extension":
@@ -3012,7 +3052,7 @@ export default {
           name: "foundry_write_extension",
           label: "Write Extension",
           description:
-            "Write a new OpenClaw extension to ~/.openclaw/extensions/. Restart gateway to load.",
+            "Write a new OpenClaw extension to ~/.openclaw/extensions/. Use foundry_restart to load and resume.",
           parameters: {
             type: "object" as const,
             properties: {
@@ -3108,7 +3148,19 @@ export default {
                 output += `\n**Security flags (review recommended):**\n${validation.securityFlags.map((f) => `- ${f}`).join("\n")}\n`;
               }
 
-              output += `\n**Run \`openclaw gateway restart\` to load.**`;
+              // Link success to previous failure → create pattern
+              const pendingKey = `ext:${p.id}`;
+              const pending = pendingFailures.get(pendingKey);
+              if (pending) {
+                // Create pattern: failure error → successful code approach
+                const resolution = `Fixed by: ${tools.map(t => t.name).join(", ")} tools, avoiding: ${pending.error.slice(0, 100)}`;
+                learningEngine.recordResolution(pending.failureId, resolution);
+                pendingFailures.delete(pendingKey);
+                logger.info(`[foundry] Learned pattern from ${p.id}: ${pending.error.slice(0, 50)}...`);
+                output += `\n**Learned**: Pattern created from previous failure.\n`;
+              }
+
+              output += `\n**Next**: Call \`foundry_restart\` to reload gateway and auto-resume this conversation.`;
 
               return { content: [{ type: "text", text: output }] };
             } catch (err: any) {
@@ -3118,12 +3170,14 @@ export default {
               const isValidationError = errorMsg.includes("validation");
 
               // Record the failure for learning
-              learningEngine.recordFailure(
+              const failureId = learningEngine.recordFailure(
                 "foundry_write_extension",
                 errorMsg,
                 `Extension: ${p.id}, Tools: ${tools.length}, Hooks: ${hooks.length}`,
                 isSandboxError ? "sandbox_runtime_error" : "validation_error",
               );
+              // Track for resolution linking when extension succeeds later
+              pendingFailures.set(`ext:${p.id}`, { failureId, error: errorMsg, timestamp: Date.now() });
 
               // Build detailed feedback for the LLM to self-correct
               let feedback = `## Extension FAILED - SelfEvolve Feedback\n\n`;
@@ -3578,7 +3632,7 @@ export default {
               content: [
                 {
                   type: "text",
-                  text: `Added tool **${p.name}** to **${p.extensionId}**.\n\nRestart gateway to load.`,
+                  text: `Added tool **${p.name}** to **${p.extensionId}**.\n\nCall \`foundry_restart\` to load and resume.`,
                 },
               ],
             };
@@ -3637,7 +3691,7 @@ export default {
               content: [
                 {
                   type: "text",
-                  text: `Added **${p.event}** hook to **${p.extensionId}**.\n\nRestart gateway to load.`,
+                  text: `Added **${p.event}** hook to **${p.extensionId}**.\n\nCall \`foundry_restart\` to load and resume.`,
                 },
               ],
             };
@@ -3925,7 +3979,7 @@ ${p.toolCode
                       `Added tool **${p.toolName}** to foundry extension.\n\n` +
                       `- Location: ${actualPath}\n` +
                       `- Lines added: ~${newTool.split("\n").length}\n\n` +
-                      `**Restart gateway to load the new tool.**`,
+                      `**Call \`foundry_restart\` to load and resume.**`,
                   },
                 ],
               };
@@ -3971,7 +4025,7 @@ ${p.toolCode
                     text:
                       `## Self-Modified\n\n` +
                       `Inserted code after marker.\n\n` +
-                      `**Restart gateway to load changes.**`,
+                      `**Call \`foundry_restart\` to load and resume.**`,
                   },
                 ],
               };
