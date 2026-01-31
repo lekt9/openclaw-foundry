@@ -1,6 +1,6 @@
 {
   "name": "@getfoundry/foundry-openclaw",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "The forge that forges itself — self-writing meta-extension for OpenClaw",
   "type": "module",
   "main": "index.ts",
@@ -52,8 +52,14 @@
     "clawdbot": "*"
   },
   "peerDependenciesMeta": {
-    "moltbot": { "optional": true },
-    "openclaw": { "optional": true },
-    "clawdbot": { "optional": true }
+    "moltbot": {
+      "optional": true
+    },
+    "openclaw": {
+      "optional": true
+    },
+    "clawdbot": {
+      "optional": true
+    }
   }
 }
