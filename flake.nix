@@ -20,10 +20,12 @@
           inherit pname version;
           src = ./.;
 
-          # Run: nix build 2>&1 | grep "got:" to get the correct hash
-          npmDepsHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          npmDepsHash = "sha256-ptuc/+svTyyuzjcNDkYmzWMqINGvCD4rUpmW4iX0BhE=";
 
           nodejs = pkgs.nodejs_22;
+
+          # Fix npm cache write issues
+          makeCacheWritable = true;
 
           buildPhase = ''
             # No build step needed - TypeScript runs via tsx at runtime
