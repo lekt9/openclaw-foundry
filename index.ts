@@ -1447,10 +1447,10 @@ class LearningEngine {
   }
 
   // HexMachina: Check if pattern should be crystallized
+  // Lowered threshold: any pattern with a resolution can be manually crystallized
   shouldCrystallize(pattern: LearningEntry): boolean {
     return (
       pattern.type === "pattern" &&
-      pattern.useCount >= 3 &&
       !pattern.crystallizedTo &&
       !!pattern.resolution
     );
@@ -4147,12 +4147,15 @@ ${p.toolCode
             } else {
               for (const entry of entries) {
                 output += `### ${entry.type.toUpperCase()}: ${entry.tool || "general"}\n`;
+                output += `- **ID**: \`${entry.id}\`\n`;
                 if (entry.error)
                   output += `- **Error**: ${entry.error.slice(0, 100)}...\n`;
                 if (entry.resolution)
                   output += `- **Resolution**: ${entry.resolution}\n`;
                 if (entry.context)
                   output += `- **Context**: ${entry.context.slice(0, 200)}...\n`;
+                if (entry.crystallizedTo)
+                  output += `- **Crystallized**: ✅ ${entry.crystallizedTo}\n`;
                 output += `- **When**: ${entry.timestamp}\n\n`;
               }
             }
@@ -4662,10 +4665,11 @@ ${p.toolCode
             }
 
             // Crystallization candidates (HexMachina)
-            if (report.crystallizationCandidates.length > 0) {
+            const allCandidates = learningEngine.getCrystallizationCandidates();
+            if (allCandidates.length > 0) {
               output += `### Crystallization Candidates (HexMachina)\n`;
-              output += `Patterns ready to become executable hooks:\n\n`;
-              for (const c of report.crystallizationCandidates) {
+              output += `Patterns with resolutions ready to become executable hooks:\n\n`;
+              for (const c of allCandidates) {
                 output += `- **${c.tool}**: "${c.error?.slice(0, 50)}..." (used ${c.useCount}x)\n`;
                 output += `  → \`foundry_crystallize patternId="${c.id}"\`\n`;
               }
